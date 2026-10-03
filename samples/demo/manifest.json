@@ -1,0 +1,139 @@
+{
+ "name": "checkm2-web 演示数据",
+ "description": "3 个 MAG(含重复 bin 与污染 contig)+ Hi-C + 丰度,所有计数来自 CheckM2 官方训练基因组",
+ "genomes": {
+  "X": {
+   "row": 512,
+   "gc": 0.618,
+   "abundance": [
+    12.5,
+    3.2,
+    8.0,
+    1.1
+   ]
+  },
+  "Y": {
+   "row": 0,
+   "gc": 0.408,
+   "abundance": [
+    0.5,
+    9.8,
+    2.2,
+    6.4
+   ]
+  },
+  "Z": {
+   "row": 5299,
+   "gc": 0.552,
+   "abundance": [
+    2.1,
+    18.0,
+    0.9,
+    12.0
+   ]
+  }
+ },
+ "magComposition": {
+  "MAG_A": [
+   "X01",
+   "X02",
+   "X03",
+   "X04",
+   "X05",
+   "X06",
+   "X07",
+   "X08",
+   "X09",
+   "X10",
+   "X11",
+   "X12",
+   "X13",
+   "X14",
+   "X15",
+   "X16",
+   "X17",
+   "X18",
+   "X19",
+   "X20",
+   "X21",
+   "X22",
+   "X23",
+   "X24",
+   "X25",
+   "X26",
+   "X27",
+   "X28",
+   "Z19",
+   "Z20"
+  ],
+  "MAG_B": [
+   "Y01",
+   "Y02",
+   "Y03",
+   "Y04",
+   "Y05",
+   "Y06",
+   "Y07",
+   "Y08",
+   "Y09",
+   "Y10",
+   "Y11",
+   "Y12",
+   "Y13",
+   "Y14",
+   "Y15",
+   "Y16",
+   "Y17",
+   "Y18"
+  ],
+  "MAG_C": [
+   "X01",
+   "X03",
+   "X05",
+   "X07",
+   "X09",
+   "X11",
+   "Z01",
+   "Z02",
+   "Z03",
+   "Z04",
+   "Z05",
+   "Z06",
+   "Z07",
+   "Z08",
+   "Z09",
+   "Z10",
+   "Z11",
+   "Z12",
+   "Z13",
+   "Z14"
+  ]
+ },
+ "summary": {
+  "MAG_A": {
+   "contigs": 30,
+   "cds": 3588
+  },
+  "MAG_B": {
+   "contigs": 18,
+   "cds": 1683
+  },
+  "MAG_C": {
+   "contigs": 20,
+   "cds": 2217
+  }
+ },
+ "files": [
+  "abundance/abundance.tsv",
+  "checkm2_out/diamond_output/DIAMOND_RESULTS.tsv",
+  "checkm2_out/protein_files/MAG_A.faa",
+  "checkm2_out/protein_files/MAG_B.faa",
+  "checkm2_out/protein_files/MAG_C.faa",
+  "checkm2_out/quality_report.tsv",
+  "hic/contig_hic.tsv",
+  "mags/MAG_A.fa",
+  "mags/MAG_B.fa",
+  "mags/MAG_C.fa",
+  "manifest.json"
+ ]
+}

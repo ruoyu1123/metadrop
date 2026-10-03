@@ -1,0 +1,283 @@
+{
+ "generated_from": "D:\\prejects\\metadrop\\reference\\CheckM2",
+ "layout": {
+  "n_features": 21241,
+  "metadata": {
+   "offset": 0,
+   "count": 22
+  },
+  "ko_genes": {
+   "offset": 22,
+   "count": 19999
+  },
+  "ko_pathways": {
+   "offset": 20021,
+   "count": 416
+  },
+  "ko_modules": {
+   "offset": 20437,
+   "count": 757
+  },
+  "ko_categories": {
+   "offset": 21194,
+   "count": 47
+  },
+  "specific_model_vector_len": 20021,
+  "metadata_order": [
+   "A",
+   "C",
+   "D",
+   "E",
+   "F",
+   "G",
+   "H",
+   "I",
+   "K",
+   "L",
+   "M",
+   "N",
+   "P",
+   "Q",
+   "R",
+   "S",
+   "T",
+   "V",
+   "W",
+   "Y",
+   "AALength",
+   "CDS"
+  ]
+ },
+ "assets": {
+  "general_comp": {
+   "n_trees": 450,
+   "total_nodes": 4500,
+   "total_leaves": 4950,
+   "n_features": 21241,
+   "data_offset": 32,
+   "layout": {
+    "node_offsets": [
+     32,
+     1804
+    ],
+    "leaf_offsets": [
+     1836,
+     1804
+    ],
+    "split_feature": [
+     3640,
+     18000
+    ],
+    "threshold": [
+     21640,
+     36000
+    ],
+    "left_child": [
+     57640,
+     18000
+    ],
+    "right_child": [
+     75640,
+     18000
+    ],
+    "decision_type": [
+     93640,
+     4500
+    ],
+    "leaf_value": [
+     98140,
+     39600
+    ]
+   },
+   "bytes": 137740,
+   "file": "general_comp.gbm.bin",
+   "source": "general_model_COMP.gbm"
+  },
+  "cont": {
+   "n_trees": 450,
+   "total_nodes": 94500,
+   "total_leaves": 94950,
+   "n_features": 21241,
+   "data_offset": 32,
+   "layout": {
+    "node_offsets": [
+     32,
+     1804
+    ],
+    "leaf_offsets": [
+     1836,
+     1804
+    ],
+    "split_feature": [
+     3640,
+     378000
+    ],
+    "threshold": [
+     381640,
+     756000
+    ],
+    "left_child": [
+     1137640,
+     378000
+    ],
+    "right_child": [
+     1515640,
+     378000
+    ],
+    "decision_type": [
+     1893640,
+     94500
+    ],
+    "leaf_value": [
+     1988140,
+     759600
+    ]
+   },
+   "bytes": 2747740,
+   "file": "cont.gbm.bin",
+   "source": "model_CONT.gbm"
+  },
+  "scaler": {
+   "layout": {
+    "min": [
+     12,
+     169928
+    ],
+    "scale": [
+     169940,
+     169928
+    ]
+   },
+   "bytes": 339868,
+   "file": "scaler.bin",
+   "n_features": 21241,
+   "feature_range": [
+    0.0,
+    1.0
+   ]
+  },
+  "nn_comp": {
+   "file": "nn_comp.bin",
+   "layers": [
+    {
+     "type": "conv1d",
+     "name": "conv1d",
+     "filters": 180,
+     "kernel": 10,
+     "stride": 10,
+     "activation": "linear",
+     "in_channels": 1
+    },
+    {
+     "type": "bn",
+     "name": "batch_normalization",
+     "size": 180,
+     "epsilon": 0.001
+    },
+    {
+     "type": "conv1d",
+     "name": "conv1d_1",
+     "filters": 180,
+     "kernel": 10,
+     "stride": 10,
+     "activation": "relu",
+     "in_channels": 180
+    },
+    {
+     "type": "bn",
+     "name": "batch_normalization_1",
+     "size": 180,
+     "epsilon": 0.001
+    },
+    {
+     "type": "conv1d",
+     "name": "conv1d_2",
+     "filters": 180,
+     "kernel": 10,
+     "stride": 10,
+     "activation": "relu",
+     "in_channels": 180
+    },
+    {
+     "type": "bn",
+     "name": "batch_normalization_2",
+     "size": 180,
+     "epsilon": 0.001
+    },
+    {
+     "type": "conv1d",
+     "name": "conv1d_3",
+     "filters": 100,
+     "kernel": 10,
+     "stride": 10,
+     "activation": "relu",
+     "in_channels": 180
+    },
+    {
+     "type": "bn",
+     "name": "batch_normalization_3",
+     "size": 100,
+     "epsilon": 0.001
+    },
+    {
+     "type": "flatten",
+     "name": "flatten"
+    },
+    {
+     "type": "dense",
+     "name": "dense",
+     "in": 200,
+     "out": 100,
+     "activation": "relu"
+    },
+    {
+     "type": "dense",
+     "name": "dense_1",
+     "in": 100,
+     "out": 1,
+     "activation": "sigmoid"
+    }
+   ],
+   "n_layers": 11,
+   "source": "specific_model_COMP.keras"
+  },
+  "groups": {
+   "layout": {
+    "pathways_offsets": [
+     20,
+     1668
+    ],
+    "pathways_indices": [
+     1688,
+     79996
+    ],
+    "modules_offsets": [
+     81684,
+     3032
+    ],
+    "modules_indices": [
+     84716,
+     19172
+    ],
+    "modules_denom": [
+     103888,
+     3028
+    ],
+    "categories_offsets": [
+     106916,
+     192
+    ],
+    "categories_indices": [
+     107108,
+     79996
+    ]
+   },
+   "bytes": 187104,
+   "file": "groups.bin",
+   "n_pathways": 416,
+   "n_modules": 757,
+   "n_categories": 47,
+   "n_group_ko_refs": 44791
+  }
+ }
+}

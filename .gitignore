@@ -1,0 +1,25 @@
+# 依赖与测试产物
+node_modules/
+*.log
+
+# Rust 构建缓存(cargo build 的中间产物,重新编译即可再生)
+# 注意:真正要入库的是 wasm/checkm2_core.wasm,不是这里的 target/
+wasm-core/target/
+
+# 浏览器回归测试的截图(可随时重跑 tools/browser_check.mjs 生成)
+tools/browser_shots/
+
+# 离线单文件产物(20MB,可随时重跑 tools/build_offline.mjs 生成)
+dist/
+
+# 说明:assets/(模型与参考数据 ~52MB)与 samples/(演示数据 ~11MB)是"开箱即用"的
+# 必要组成,因此**不**忽略 —— 否则新克隆的仓库必须先跑一遍导出脚本才能用。
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时文件
+.tmp*
+.shot-*
+.ab.log

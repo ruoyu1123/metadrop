@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metadrop · MAG 去重与质量复算</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><rect width='48' height='48' rx='13' fill='%232563eb'/><path d='M24 7.9C24 7.9 11.9 21.1 11.9 27.9A12.1 12.1 0 1 0 36.1 27.9C36.1 21.1 24 7.9 24 7.9Z' fill='%23fff'/><g fill='none' stroke='%231b4fd0' stroke-width='3' stroke-linecap='round'><path d='M18.6 22.1h10.8M17.3 27.9h13.4M19.2 33.7h9.6'/></g></svg>">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ============================================================ 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <!-- 程序图标(内联 SVG,和浏览器标签页的 <link rel="icon"> 是同一个图形):
+           一滴液体内躺着三条渐次变短的基因片段 —— 取 "Meta(宏基因组)+ Drop(液滴)"
+           与 "逐条剔除 contig" 两层意思。改这里时记得同步改 favicon 那份扁平色版本。 -->
+      <div class="brand-mark" role="img" aria-label="Metadrop">
+        <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="md-tile" x1="0" y1="0" x2="0.35" y2="1">
+              <stop offset="0" stop-color="#4f8bf7"/>
+              <stop offset="1" stop-color="#1b4fd0"/>
+            </linearGradient>
+            <linearGradient id="md-drop" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#ffffff"/>
+              <stop offset="1" stop-color="#dbe8fd"/>
+            </linearGradient>
+          </defs>
+          <rect width="48" height="48" rx="13" fill="url(#md-tile)"/>
+          <path d="M24 7.9C24 7.9 11.9 21.1 11.9 27.9A12.1 12.1 0 1 0 36.1 27.9C36.1 21.1 24 7.9 24 7.9Z"
+                fill="url(#md-drop)"/>
+          <g fill="none" stroke="#1b4fd0" stroke-width="3" stroke-linecap="round">
+            <path d="M18.6 22.1h10.8M17.3 27.9h13.4M19.2 33.7h9.6"/>
+          </g>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1 data-i18n="app.title">Metadrop</h1>
+        <p data-i18n="app.subtitle">CheckM2 结果全解析 · 单拷贝基因重算</p>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <span id="local-badge" class="badge badge-local" data-i18n="badge.local" data-i18n-title="badge.local.title">本地运行</span>
+      <span id="localio-badge" class="badge badge-localio" hidden>本地直写</span>
+      <span class="topbar-sep"></span>
+      <span id="backend-badge" class="badge badge-quiet" data-i18n="badge.backend.loading" data-i18n-title="badge.backend.title">正在加载模型</span>
+      <span class="topbar-sep"></span>
+
+      <button id="btn-demo" class="btn" type="button" data-i18n="btn.demo">载入演示数据</button>
+      <button id="btn-open" class="btn btn-primary" type="button" data-i18n="btn.open" data-i18n-title="btn.open.title">打开文件夹…</button>
+
+      <!-- 输出区:路径 → 完成输出(直写磁盘) / 导出 ZIP(打包下载) -->
+      <div class="outdir-group">
+        <span class="outdir-caption" data-i18n="outdir.caption">输出</span>
+        <input id="outdir-input" class="input outdir-input" type="text" spellcheck="false" autocomplete="off"
+               data-i18n-placeholder="outdir.placeholder" placeholder="选择或输入输出文件夹…">
+        <button id="btn-outdir" class="btn btn-sm" type="button" data-i18n="btn.outdir" data-i18n-title="btn.outdir.title">选择…</button>
+        <button id="btn-output" class="btn btn-sm btn-primary" type="button" data-i18n="btn.output" data-i18n-title="btn.output.title" disabled>完成输出</button>
+        <button id="btn-export" class="btn btn-sm" type="button" data-i18n="btn.export" data-i18n-title="btn.export.title" disabled>导出 ZIP</button>
+        <button id="btn-reveal" class="btn btn-sm btn-ghost" type="button" data-i18n="btn.reveal" data-i18n-title="btn.reveal.title" hidden>打开文件夹</button>
+      </div>
+
+      <!-- 语言切换:固定在最右上角 -->
+      <div id="lang-toggle" class="lang-toggle" role="group" data-i18n-title="lang.toggle.title">
+        <button type="button" data-lang="zh" aria-pressed="true">中文</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+
+      <input id="file-input" type="file" webkitdirectory directory multiple hidden>
+    </div>
+  </header>
+
+  <!-- ============================================================ 主体 -->
+  <main id="main" class="layout">
+
+    <!-- ---------------------------------------------------- 左:MAG 列表 -->
+    <aside class="panel panel-left">
+      <div class="panel-head">
+        <h2 data-i18n="panel.mags">MAG 列表</h2>
+        <span id="mag-count" class="count">0</span>
+      </div>
+      <div class="panel-tools">
+        <input id="mag-filter" class="input" type="search" data-i18n-placeholder="panel.mags.filter" placeholder="过滤 MAG 名…">
+      </div>
+      <div id="mag-list" class="mag-list">
+        <p class="placeholder" data-i18n="panel.mags.empty">还没有载入数据。</p>
+      </div>
+    </aside>
+
+    <!-- ---------------------------------------------------- 中:contig 表 -->
+    <section class="panel panel-center">
+      <div class="panel-head panel-head-stack">
+        <div class="head-row">
+          <h2 id="center-title" data-i18n="panel.contigs">选择左侧的 MAG</h2>
+          <div class="head-actions">
+            <button id="btn-suggest" class="btn btn-sm btn-primary" type="button" data-i18n="btn.suggest" data-i18n-title="btn.suggest.title" disabled>自动建议</button>
+            <button id="btn-reset" class="btn btn-sm" type="button" data-i18n="btn.reset" data-i18n-title="btn.reset.title" disabled>还原本 MAG</button>
+            <button id="btn-reset-all" class="btn btn-sm" type="button" data-i18n="btn.resetAll" data-i18n-title="btn.resetAll.title" disabled>全部还原</button>
+          </div>
+        </div>
+
+        <!-- 实时质量读数 -->
+        <div id="quality-strip" class="quality-strip" hidden>
+          <div class="qs-item">
+            <label data-i18n="qs.completeness">完整度</label>
+            <div class="qs-value">
+              <strong id="qs-completeness">–</strong>
+              <span id="qs-completeness-delta" class="delta"></span>
+            </div>
+          </div>
+          <div class="qs-item">
+            <label data-i18n="qs.contamination">污染度</label>
+            <div class="qs-value">
+              <strong id="qs-contamination">–</strong>
+              <span id="qs-contamination-delta" class="delta"></span>
+            </div>
+          </div>
+          <div class="qs-item">
+            <label data-i18n="qs.class">质量等级</label>
+            <div class="qs-value"><span id="qs-class" class="badge">–</span></div>
+          </div>
+          <div class="qs-item">
+            <label data-i18n="qs.contigs">contig</label>
+            <div class="qs-value"><strong id="qs-contigs">–</strong></div>
+          </div>
+          <div class="qs-item">
+            <label data-i18n="qs.size">基因组大小</label>
+            <div class="qs-value"><strong id="qs-size">–</strong></div>
+          </div>
+          <div class="qs-item">
+            <label data-i18n="qs.report">官方报告</label>
+            <div class="qs-value"><span id="qs-report" class="muted">–</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-tools panel-tools-row">
+        <input id="contig-filter" class="input" type="search" data-i18n-placeholder="filter.contig" placeholder="过滤 contig…" disabled>
+        <label class="check"><input id="only-flagged" type="checkbox" disabled> <span data-i18n="filter.onlyFlagged">只看可疑</span></label>
+        <span class="spacer"></span>
+        <span id="contig-count" class="count">–</span>
+      </div>
+
+      <div class="table-wrap">
+        <table id="contig-table" class="grid">
+          <thead>
+            <tr>
+              <th class="col-keep" data-i18n="th.keep" data-i18n-title="th.keep.title" title="取消勾选即从 MAG 中移除">保留</th>
+              <th class="col-id sortable" data-sort="id" data-i18n="th.contig">Contig</th>
+              <th class="col-num col-len sortable" data-sort="length" data-i18n="th.length" data-i18n-title="th.length.title" title="占当前 MAG 总长的比例">长度</th>
+              <th class="col-num sortable" data-sort="cds" data-i18n="th.cds">CDS</th>
+              <th class="col-num sortable" data-sort="gc" data-i18n="th.gc">GC%</th>
+              <th class="col-num sortable" data-sort="ko" data-i18n="th.ko">KO</th>
+              <th class="col-num sortable" data-sort="unique" data-i18n="th.unique">独有 KO</th>
+              <th class="col-num sortable" data-sort="hicIntra" data-i18n="th.hicIntra" data-i18n-title="th.hicIntra.title" title="与该 MAG 内其他 contig 的 Hi-C 信号">Hi-C 内部</th>
+              <th class="col-num sortable" data-sort="hicInter" data-i18n="th.hicInter" data-i18n-title="th.hicInter.title" title="与该 MAG 外 contig 的 Hi-C 信号">Hi-C 外部</th>
+              <th class="col-num sortable" data-sort="abundRatio" data-i18n="th.abund" data-i18n-title="th.abund.title" title="该 contig 丰度谱与 MAG 平均谱的余弦相似度">丰度一致</th>
+              <th class="col-flag" data-i18n="th.verdict">判断</th>
+              <th class="col-impact sortable" data-sort="impact" data-i18n="th.impact" data-i18n-title="th.impact.title" title="移除该 contig 后完整度 / 污染度的变化">移除影响</th>
+            </tr>
+          </thead>
+          <tbody id="contig-body"></tbody>
+        </table>
+        <div id="empty-hint" class="empty-hint">
+          <div class="eh-icon">⇪</div>
+          <h3 data-i18n="land.title">拖入数据开始</h3>
+          <p data-i18n="land.desc">把 CheckM2 结果目录、MAG 序列(.fa/.fna)、Hi-C 信号表、丰度表一起拖到这里;或点击右上角「载入演示数据」先看效果。</p>
+          <p class="eh-sub" data-i18n="land.sub">全部计算在本机浏览器内完成,数据不会上传到任何地方。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- 右:详情面板 -->
+    <aside class="panel panel-right">
+      <div class="panel-head">
+        <h2 data-i18n="panel.detail">Contig 详情</h2>
+      </div>
+      <div id="detail" class="detail">
+        <p class="muted hint" data-i18n="detail.hint">把鼠标移到中间表格的任意 contig 上,这里会显示它的完整信息、去除后的预测质量,以及判断依据。</p>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- ============================================================ 状态栏 -->
+  <footer class="statusbar">
+    <span id="status-text" data-i18n="status.ready">就绪</span>
+    <div class="status-right">
+      <div id="progress" class="progress" hidden><div id="progress-bar"></div></div>
+      <span id="warn-toggle" class="warn-toggle" hidden>⚠ <span id="warn-count">0</span></span>
+    </div>
+  </footer>
+
+  <!-- ============================================================ 页脚(署名) -->
+  <!-- 引用条目尚未定稿:文章发表后,把词典里的 foot.ref(js/i18n.js 的 zh/en 两处)
+       换成正式引用信息即可,这里不需要动。 -->
+  <footer class="pagefoot">
+    <span class="foot-credit" data-i18n="foot.design">Design by yangjinbao</span>
+    <span class="foot-sep" aria-hidden="true">·</span>
+    <span class="foot-cite"><span data-i18n="foot.cite">使用本程序请引用文章:</span> <code class="foot-ref" data-i18n="foot.ref">待发表</code></span>
+  </footer>
+
+</div>
+
+<!-- ============================================================ 拖放遮罩 -->
+<div id="drop-overlay" class="drop-overlay">
+  <div class="drop-card">
+    <div class="drop-icon">⇪</div>
+    <h3 data-i18n="drop.title">松开即可载入</h3>
+    <p data-i18n="drop.desc">支持整个文件夹:CheckM2 输出目录、MAG 序列(.fa/.fna)、Hi-C 表、丰度表</p>
+  </div>
+</div>
+
+<!-- ============================================================ 悬停卡片 -->
+<div id="hover-card" class="hover-card" hidden></div>
+
+<!-- ============================================================ 提示列表 -->
+<div id="warn-panel" class="warn-panel" hidden>
+  <div class="warn-head"><h3 data-i18n="warn.title">解析提示</h3><button id="warn-close" class="btn btn-sm" type="button" data-i18n="warn.close">关闭</button></div>
+  <ul id="warn-list"></ul>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
