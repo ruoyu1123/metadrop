@@ -1,157 +1,351 @@
-# Metadrop — MAG 去重与质量复算
+# Metadrop
 
-一个**纯本地、离线**的网页应用:导入一个或多个 MAG 及其 CheckM2 结果,
-在浏览器里**不重跑 CheckM2** 就精确复算完整度 / 污染度,并通过 Hi-C 信号与丰度谱
-找出重复 bin 成员和污染 contig,支持逐个点击移除并实时看到质量变化。
+**Local, offline recalculation and decontamination of metagenome-assembled genomes (MAGs).**
 
-计算核心用 **Rust 编译成 WebAssembly**,模型(GBDT + CNN)全部打包在 `assets/`
-(约 7 MB)里,首次加载后完全离线运行。
+Metadrop imports one or more MAGs together with their CheckM2 output and, **without
+re-running CheckM2**, recomputes completeness and contamination in the browser with
+numerical fidelity to the reference implementation. It then uses Hi-C linkage and
+abundance profiles as independent evidence to identify duplicated bin members and
+contaminating contigs, which can be removed one at a time with immediate feedback on
+the recomputed quality of the affected MAG.
 
-结果落到哪里由你决定:配上附带的本地服务(`tools/serve.mjs`)就**直接写进你指定的
-输出文件夹**;不配就**打包成一个 ZIP 下载**。两条路都不上传任何数据。
+The computation core is written in Rust and compiled to WebAssembly. Both models
+(gradient-boosted trees and a convolutional network) are bundled in `assets/`
+(6.8 MB); after the first load the application runs entirely offline.
+
+Results go wherever you choose. With the bundled local helper (`tools/serve.mjs`)
+they are **written directly to a directory you specify**; without it they are
+**packaged into a single ZIP download**. Neither route uploads any data.
 
 ---
 
-## 1. 快速开始
+## Table of contents
 
-三种跑法,**都不需要上传任何数据**。区别只在"结果怎么落到磁盘"。
+1. [Overview](#1-overview)
+2. [Quick start](#2-quick-start)
+3. [Input data contract](#3-input-data-contract)
+4. [Numerical agreement with CheckM2](#4-numerical-agreement-with-checkm2)
+5. [Decision logic](#5-decision-logic)
+6. [Output files](#6-output-files)
+7. [Repository layout](#7-repository-layout)
+8. [Demonstration dataset](#8-demonstration-dataset)
+9. [Security and privacy](#9-security-and-privacy)
+10. [Testing](#10-testing)
+11. [Rebuilding from source](#11-rebuilding-from-source)
+12. [Known limitations](#12-known-limitations)
+13. [Citation](#13-citation)
 
-### 方式 A:本地服务(推荐 —— 结果直写磁盘)
+---
+
+## 1. Overview
+
+CheckM2 reports completeness and contamination for a MAG, but not for its individual
+contigs. Deciding *which contig to remove* is therefore the practical problem, and the
+obvious signal is the wrong one: **the change in completeness caused by a deletion**.
+A contaminating contig frequently carries single-copy genes that the model credits to
+the host, so removing it removes both the foreign sequence and the borrowed credit, and
+completeness can *fall*. In one of our demonstration bins, removing a known contaminant
+lowers completeness by 1.6 percentage points.
+
+Metadrop addresses both halves of the problem separately:
+
+| Goal | Approach |
+| --- | --- |
+| Recompute quality after any set of contig removals | Port CheckM2's feature construction and both models to WebAssembly; reproduce the reference implementation exactly |
+| Decide *which* contigs to remove | Model-independent evidence: Hi-C linkage consistency and abundance-profile similarity, plus the objective fact of bin-level duplication |
+
+The two are deliberately kept apart. Every number reported as "CheckM2 completeness"
+is a faithful reimplementation; every verdict about *membership* comes from evidence
+that does not depend on the completeness model at all.
+
+### Design constraints
+
+- **Entirely local.** No backend, no upload, no telemetry, no CDN, no external request of
+  any kind. The offline build is asserted to make zero HTTP(S) requests.
+- **No runtime dependencies.** `package.json` declares no `dependencies` and no
+  `devDependencies`; there is no `node_modules`. The application is plain ES modules
+  plus one WebAssembly module.
+- **Exact reproduction, not approximation.** Agreement with the reference
+  implementation is element-wise (Section 4).
+
+---
+
+## 2. Quick start
+
+Three ways to run it, all of which keep data on the local machine. They differ only in
+how results reach the filesystem.
+
+### 2.1 Local helper (recommended — results are written to disk)
 
 ```bash
 cd app
-node tools/serve.mjs --out "D:/metadrop_out"     # 可省略 --out,默认 ./metadrop_out
-# 浏览器打开 http://127.0.0.1:8788/
+node tools/serve.mjs --out "D:/metadrop_out"     # --out is optional; defaults to ./metadrop_out
+# open http://127.0.0.1:8788/
 ```
 
-`serve.mjs` 是一个**零依赖**的 Node 脚本,它同时干两件事:
+`serve.mjs` is a dependency-free Node script that does two things:
 
-1. 把网页递给浏览器(就是原来 `python -m http.server` 干的活);
-2. 因为进程本来就在这台机器上,它顺手把结果**直接写进你指定的输出文件夹**。
+1. serves the application to the browser, replacing `python -m http.server`;
+2. because the process already runs on this machine, writes results **directly into the
+   output directory you specified**.
 
-于是页面上多了一个「**完成输出**」按钮:点一下,`checkm2_web_summary.tsv`、
-`checkm2_web_contigs.tsv` 和每个 MAG 的 `<名字>.cleaned.fa` 就直接躺在
-`--out` 指定的目录里了,**不经过浏览器下载**。
+This adds a **Write results** button to the interface. Clicking it places
+`checkm2_web_summary.tsv`, `checkm2_web_contigs.tsv` and one `<name>.cleaned.fa` per
+modified MAG directly into the directory given by `--out`, with no browser download step.
 
 ```
    ┌──────────────┐   GET /               ┌───────────────────────────┐
-   │   浏览器      │ ────────────────────▶ │ serve.mjs (127.0.0.1)     │
-   │  ← 计算在这里  │ ◀──────────────────── │  ① 静态托管 app/           │
+   │   Browser    │ ────────────────────▶ │ serve.mjs (127.0.0.1)     │
+   │  ← compute   │ ◀──────────────────── │  ① static hosting of app/  │
    └───────┬──────┘  POST /__local__/write └───────────┬───────────────┘
-           │                                          │ 写文件
-           └────── 结果直接落到本机 out/ 目录 ◀─────────┘
+           │                                          │  write files
+           └────── results land in out/ on this host ◀┘
 ```
 
-换个输出目录不用重启:页面上「输出」右边的框在本地服务在线时**可以直接填绝对路径**,
-回车生效;点「选择…」会弹出**操作系统的原生文件夹选择框**(只有服务进程要得到绝对路径,
-浏览器拿不到)。输出完后「打开文件夹」能在资源管理器 / 访达里定位过去。
+The output directory can be changed without restarting: when the local helper is
+running, the field next to **Output** accepts an absolute path, applied on Enter.
+**Browse…** opens the operating system's native folder picker — only the helper process
+can obtain an absolute path, since browsers deliberately withhold it. **Open folder**
+then reveals the destination in Explorer or Finder.
 
-### 方式 B:离线单文件(零服务器,双击即用)
+### 2.2 Single offline file (no server, double-click to run)
 
 ```bash
-node tools/build_offline.mjs      # 产出 dist/metadrop-offline.html(约 20 MB)
+node tools/build_offline.mjs      # → dist/metadrop-offline.html (11.2 MB)
 ```
 
-把 `dist/metadrop-offline.html` 拷到任何地方,**双击**即可用。
-模型权重、演示数据全部内联在这一个文件里,全程零网络请求,
-断网也能跑通整条流程(`tools/check_offline.mjs` 会断言这一点)。
-这条路径下没有本地服务,输出方式退化为:浏览器目录手柄(Chrome/Edge)
-或直接把结果**打包成一个 ZIP 下载**。
+Copy `dist/metadrop-offline.html` anywhere and open it. Model weights and the
+demonstration dataset are inlined into that single file; the full pipeline runs with the
+network disconnected, which `tools/check_offline.mjs` asserts explicitly.
 
-### 方式 C:开发版(改动 `js/` 时用)
+Without the local helper, output degrades in one of two ways: a directory handle via the
+File System Access API (Chrome, Edge), or a single ZIP download.
+
+### 2.3 Development server (use this when editing `js/`)
 
 ```bash
 cd app
-python -m http.server 8765        # WebAssembly / fetch 不能走 file://
-# 然后浏览器打开 http://127.0.0.1:8765/
+python -m http.server 8765        # WebAssembly and fetch() do not work over file://
+# then open http://127.0.0.1:8765/
 ```
 
-任何一个静态服务器都行。没接上本地服务时,页面启动会做一次探测,
-控制台里会看到一条 `/__local__/ping` 的 404 —— 那是设计如此,不影响使用。
+Any static server will do. When the local helper is absent the application performs one
+probe at start-up, which appears in the console as a failed `/__local__/ping` request.
+This is expected and does not affect operation.
 
-页面上有三种进入方式:
+### 2.4 Interface
 
-| 方式 | 说明 |
+| Action | Description |
 | --- | --- |
-| **载入演示数据** | 直接读取 `samples/demo/`(3 个 MAG,含重复与污染,自带 Hi-C 与丰度表) |
-| **打开文件夹 / 拖拽** | 选择或拖入你自己的 CheckM2 输出目录 + MAG 序列 + Hi-C 表 + 丰度表 |
-| **输出** | 指定结果落到哪:本机绝对路径(本地服务)、目录手柄(浏览器)、或打包下载 |
+| **Load demo data** | Reads `samples/demo/` (three MAGs containing duplication and contamination, with Hi-C and abundance tables) |
+| **Open folder / drag-and-drop** | Select or drop your own CheckM2 output directory, MAG sequences, Hi-C table and abundance table |
+| **Output** | Chooses where results go: absolute path (local helper), directory handle (browser), or a packaged download |
 
-快捷键:`S` 自动建议 · `R` 还原本 MAG · `E` 完成输出 · `Z` 导出 ZIP · `L` 中英切换。
+Keyboard shortcuts: `S` auto-suggest · `R` restore original MAG · `E` write results ·
+`Z` export ZIP · `L` toggle Chinese/English.
 
-### 纯本地保证
+Hovering a contig opens a card showing its annotations together with the completeness and
+contamination that **the whole MAG would have after that contig is removed** — the
+pre-computed single-deletion result, produced on hover. Clicking a contig removes or
+restores it, and the readouts refresh immediately. The **Length** column reports an
+absolute length and a percentage of the MAG's **original** total length (all contigs);
+using the original total as the denominator keeps the column summing to 100 %, so
+percentages do not drift upward as rows are removed.
 
-- 计算全部在浏览器里完成(WASM 内核 + JS 兜底),**没有后端计算**;
-- `serve.mjs` 只监听 `127.0.0.1`,并且校验 `Host` 头(挡 DNS rebinding)、
-  只放行 localhost 来源的跨域请求 —— 局域网里别的机器碰不到它;
-- 即使用了本地服务,字节也只是在**同一台机器**上从浏览器走到另一个进程,**不出本机**;
-- 页面里没有埋点、CDN 或任何外部请求,离线单文件版被测试断言"零 http(s) 请求";
-- 输出文件名在服务端还会再做一次净化,`../` 之类的路径穿越会被拍平
-  (`tools/test_local_api.mjs` 里对这几条边界都有断言)。
+**Auto-suggest** flags all suspicious contigs (duplicated plus contaminating) at once and
+produces a proposed cleaned state.
 
-### 中英文切换
-
-右上角 `中文 / EN` 按钮切换界面语言,选择记在 `localStorage`,刷新后保持;
-首次访问按浏览器语言自动选择。计算层只产出语言无关的 `key`,
-文案统一由 `js/i18n.js` 翻译;`tools/check_i18n.mjs` 会校验两个词典的
-key 集合与占位符完全对齐,并扫描源码里有没有漏翻的硬编码中文。
+> The interface is available in Chinese and English; the toggle is at the top right and
+> the choice persists in `localStorage`. All text lives in `js/i18n.js`; the computation
+> layer emits language-neutral keys only, and `tools/check_i18n.mjs` verifies that the two
+> dictionaries agree exactly and that no untranslated string remains in the source.
 
 ---
 
-## 2. 界面说明
+## 3. Input data contract
+
+Files are classified by name automatically; no configuration is required. If a category
+is missing, the corresponding capability degrades gracefully with an explicit notice.
+
+### 3.1 CheckM2 output directory (required)
 
 ```
-┌──────────────┬───────────────────────────────────────────────┬──────────────┐
-│  MAG 列表     │  contig 表格 + 实时质量读数                     │  Contig 详情  │
-│  完整度/污染度 │  勾选框 = 保留 / 取消 = 移除                    │  判断依据     │
-│  质量等级     │  悬停 → 浮动卡片:移除后的完整度与污染度          │  Hi-C 邻接    │
-│  重复/可疑计数 │  Hi-C 内外信号条 · 丰度一致性                  │  丰度谱       │
-│              │  归属证据分 · 移除影响 Δ                       │  丢失的通路   │
-└──────────────┴───────────────────────────────────────────────┴──────────────┘
+checkm2_out/
+├── quality_report.tsv                    # official report, used as the comparison baseline
+├── protein_files/<MAG>.faa               # Prodigal-predicted proteins
+└── diamond_output/DIAMOND_RESULTS*.tsv   # DIAMOND alignment (KO annotation)
 ```
 
-- **悬停任意 contig** → 浮动卡片显示它的信息 + **移除该 contig 后整个 MAG 的完整度/污染度**
-  (单条移除的预计算结果,悬停即时出数;若已经移除了别的 contig,会在此基础上重算)。
-- **点击任意 contig** → 立即从 MAG 中移除 / 恢复,左侧与顶部读数实时刷新。
-- **长度列** → 定长之外再给一个百分比,表示**占该 MAG 原始总长(全部 contig)的比例**。
-  分母取原始总长,是为了让整列合计恒为 100%:勾掉几行时,剩下的行百分比不会跟着往上跳。
-  悬停卡片与右侧详情用同一个口径。
-- **自动建议** → 一次性标出所有可疑 contig(重复 + 污染),生成"清理后"的方案。
-- **完成输出** → 把汇总表 `checkm2_web_summary.tsv`、逐 contig 明细
-  `checkm2_web_contigs.tsv`,以及每个被修改 MAG 的清理后序列 `*.cleaned.fa`
-  **直接写进输出文件夹**(见下)。
-- **导出 ZIP** → 同样这些内容,但打包成**一个** `.zip` 下载,不动输出文件夹。
+- **`quality_report.tsv`** — the default output of `checkm2 predict`. Column names must
+  include `Name`, `Completeness`, `Contamination` and `Completeness_Model_Used`. Remaining
+  columns (`Contig_N50`, `Genome_Size`, `GC_Content`, …) are surfaced in the interface.
+- **`DIAMOND_RESULTS.tsv`** — one row per hit, `{bin}Ω{protein id}\t{UniRef}~{KO}\t…`.
+  CheckM2 separates bin and protein with `Ω` (U+03A9). If that separator has been altered,
+  the parser falls back to longest-prefix matching against the known bin names. Custom
+  mapping tables such as `protein2contig.map.tsv` (two columns: protein id, contig) are
+  also accepted.
+- If CheckM2 was run with `--remove_intermediates`, `diamond_output/` will have been
+  deleted. Only metadata can then be recovered; completeness cannot be recomputed.
 
-### 输出:直写磁盘,还是打包下载
+### 3.2 MAG assembly files (required)
 
-「输出」这一块是本次改造的重点 —— 输出位置一共有三种,优先级从高到低:
+Extensions `.fna`, `.fa`, `.fasta`, `.fas`, `.ffn` (optionally gzip-compressed). The file
+name without extension is the MAG name and must match `Name` in `quality_report.tsv`.
 
-| 情况 | 「完成输出」做什么 | 怎么设置输出位置 |
+**The sequence files are the sole authority on the contig set.** Contigs listed in the
+interface, and the `<MAG>.cleaned.fa` files written on export, both derive from this
+source:
+
+- protein files (`.faa`) and DIAMOND results only contribute gene-level information
+  (CDS and KO counts) and never introduce contigs that are absent from the sequences;
+- a protein pointing at a contig that does not appear in the sequence file is recorded as
+  an orphan and ignored, with a notice in the status bar;
+- a bin present in the report but lacking any sequence file is skipped with a warning
+  rather than presented as a bin with zero contigs;
+- if not a single MAG sequence can be read, the application reports an error instead of
+  producing an empty but plausible-looking result.
+
+Only per-sequence statistics (length, GC) are held in memory; the full sequences are
+re-read as a stream when cleaned files are written.
+
+### 3.3 Hi-C linkage table (strongly recommended)
+
+`hic/*.tsv`, or any file whose name contains `hic`, `contact` or `link`. Two layouts are
+supported:
+
+```tsv
+# edge list (preferred)
+contig_a	contig_b	signal
+k141_51	k141_88	412
+```
+
+```tsv
+# dense matrix (rows and columns are contig names)
+        k141_51  k141_88  k141_93
+k141_51     0       412      18
+```
+
+### 3.4 Abundance table (strongly recommended)
+
+Any file whose name contains `abund`, `coverage`, `coverm`, `tpm`, `rpkm` or `count`.
+The first column is the contig identifier; the remaining columns are samples. Columns in
+coverM style (`*.Mean`, `*.Coverage`) are recognised automatically, with `Mean` preferred.
+
+---
+
+## 4. Numerical agreement with CheckM2
+
+CheckM2 is not a marker-gene counter in the manner of CheckM1; completeness and
+contamination are produced by machine-learned models. Metadrop mirrors the model files
+of the official distribution into the browser and reproduces them with an equivalent
+numerical implementation.
+
+| Stage | Reference implementation | This project |
 | --- | --- | --- |
-| **本地服务在线**(`node tools/serve.mjs`) | POST 给服务进程,**直写本机绝对路径** | 在输入框里填路径回车,或点「选择…」弹原生文件夹对话框 |
-| 只有浏览器 | 写进 File System Access 目录手柄 | 点「选择…」,用浏览器的目录选择器 |
-| 都没有 | **打包成一个 ZIP 下载**,并在状态栏说明原因 | —— |
+| Feature vector | 21,241 dimensions: 20 amino-acid counts + AALength + CDS, then 19,999 KO counts, then 416 pathway + 757 module + 47 category completeness groups | `js/engine.js` → `fillFeatures()` |
+| Completeness, general | LightGBM `general_model_COMP.gbm` (450 trees, objective `regression sqrt`, prediction = `raw · |raw|`) | `wasm-core/src/lib.rs` → `c2_gbm_predict` |
+| Completeness, specific | Keras CNN `specific_model_COMP.keras` (4 × Conv1D + BatchNorm + Dense) | `c2_nn_forward` |
+| Contamination | LightGBM `model_CONT.gbm` | `c2_gbm_predict` |
+| Normalisation | scikit-learn `MinMaxScaler` | `c2_minmax_transform` |
+| Model selection | Maximum cosine similarity against 5,300 reference genomes, then `cosine_decider` | **Not reimplemented** (Section 4.1): the model recorded in the report is reused; without a report the choice degrades, and the 47 MB reference matrix is not shipped |
 
-几点值得说明:
+### 4.1 Measured agreement
 
-- **输出位置只有一个按钮,不会"以为设了其实没用"。** 状态栏永远回显实际写到哪;
-  接了本地服务时顶部还会亮一个**「本地直写」**徽章。
-- **「导出 ZIP」是一条独立的路径**,永远只产出一个带时间戳的压缩包
-  (`metadrop_results_YYYYMMDD-HHMMSS.zip`),不再散装下载 N 个文件。
-  本地服务在线时,包会**先落在系统临时目录**(`%TEMP%/metadrop-export/<token>/`)
-  再从这个地址取回下载 —— 状态栏会把真实路径告诉你。
-  这些暂存目录**不需要你手动清**:本地服务**启动时会自动删掉超过 24 小时的旧暂存**
-  (只动 `metadrop-export` 自己的子目录,不会误伤正在导出的包)。
-- 打包用自己写的零依赖 ZIP 实现(`js/zip.js`,`deflate-raw` + `store` 兜底),
-  `tools/test_zip.mjs` 会用 **Python 标准库 `zipfile` 独立解包**来交叉验证字节流。
-- 结果很大时建议走"输出文件夹直写":ZIP 需要整份数据进内存,超过约 1.5 GB
-  会提示你改用直写,而不是让浏览器默默崩掉。
+Every figure below is asserted by an automated test.
 
-清理后的序列命名为 `<MAG 名>.cleaned.fa`,内容以**你输入的 MAG 序列文件为准**:
-只去掉被移除的 contig,头部与序列原样保留。
+| Comparison | Discrepancy |
+| --- | --- |
+| GBDT vs. official LightGBM | `0` (element-wise) |
+| CNN vs. official Keras | `< 1e-10` |
+| WebAssembly vs. pure JavaScript | `0` (GBDT, grouping), `2.5e-11` (CNN) |
+| End-to-end on real training genomes | `0` |
 
-  汇总表同时保留**官方报告值**与**本地复算值**,以及清理前后的对比和具体移除了哪些
-  contig,便于回溯和写进方法学描述:
+### 4.2 Omitted capability: cosine-based model selection
+
+CheckM2 first compares the query genome with 5,300 training genomes by cosine similarity
+and then decides between the general and specific completeness models using
+`novelty_ratio = general / cosine²` (`modelPostprocessing.cosine_decider`). This requires
+a 47 MB reference matrix (`ref_csr.bin`) that **this project does not ship**, so:
+
+- **When `quality_report.tsv` is available**, the model named in its
+  `Completeness_Model_Used` column is used. CheckM2 itself reports values under that
+  model, so the pre-cleaning recomputation is bit-for-bit comparable with the report.
+  This is the primary path.
+- **When the report is missing**, novelty cannot be computed. The engine falls back to
+  `CheckM2Engine.pickModelFallback()`, which retains the half of the official rule that
+  does not require cosine similarity (mean completeness below 55 with an
+  amino-acid-to-completeness ratio below 1500 selects the general model, the same branch
+  and the same conclusion as upstream) and otherwise averages the two models, marking
+  `modelSource` as `no-report` rather than presenting the result as official behaviour.
+
+The benefit is a 47 MB reduction in both download and resident memory; the single-file
+offline build is 11.2 MB rather than 21.4 MB. To restore the capability, re-export the
+matrix with `python tools/export_assets.py` (which regenerates `assets/ref_csr.bin`) and
+restore the loading path in `engine.js` and `c2_cosine_max`.
+
+### 4.3 Incremental recomputation
+
+Each contig stores a sparse contribution (amino-acid counts, AALength, CDS, KO counts), so
+removing any set of contigs requires only `counts = baseCounts − Σ contributions`
+followed by one model evaluation. A removal-and-recompute including the CNN takes
+roughly **9–12 ms**; pre-computing all 200 contigs takes about 2.4 s.
+
+---
+
+## 5. Decision logic
+
+### 5.1 Placement evidence score (0–1)
+
+```
+placement = 0.55 × (outward Hi-C fraction) + 0.45 × (1 − abundance cosine similarity)
+```
+
+The score **deliberately excludes the change in completeness**. Contaminants frequently
+share single-copy genes with their host, so removing one can lower completeness — an
+artefact of credit the contaminant was itself supplying. A criterion based on
+Δcompleteness would systematically miss exactly the contigs it should flag.
+
+When Hi-C data are absent a neutral default of 0.35 is used, and 0.15 when abundance data
+are absent, so that missing tables cannot produce confident misjudgements.
+
+### 5.2 Verdicts
+
+| Verdict | Trigger | Meaning |
+| --- | --- | --- |
+| **Duplicated bin member** | the same contig identifier occurs in ≥ 2 MAGs | must be removed from one side; which side is decided by a placement vote |
+| **Likely contaminant** | `placement ≥ 0.60` | Hi-C and abundance both indicate it does not belong here |
+| **Uncertain** | `0.42 ≤ placement < 0.60` | manual review recommended |
+| **Core member** | `placement < 0.42` and removing it would cost ≥ 0.2 completeness | retain |
+| Neutral | otherwise | no clear signal |
+
+### 5.3 Resolving duplicated contigs
+
+For each duplicated contig, a fit score is computed across all MAGs hosting it:
+
+```
+fit = (1 − outward Hi-C fraction) × 0.5 + abundance cosine similarity × 0.5 + (0.15 if it holds unique KOs)
+```
+
+The MAG with the highest `fit` retains the contig; the others are marked for removal.
+
+---
+
+## 6. Output files
+
+**Write results** produces:
+
+- `checkm2_web_summary.tsv` — one row per MAG;
+- `checkm2_web_contigs.tsv` — per-contig detail: retained or removed, verdict, length,
+  length share, CDS count, KO counts, intra/inter Hi-C signal, abundance cosine,
+  predicted values after removal, and the MAGs it duplicates in;
+- `<MAG>.cleaned.fa` — one FASTA per modified MAG, containing exactly the retained
+  contigs, with headers and sequences preserved byte-for-byte from the input.
+
+Cleaned sequence names are `<MAG name>.cleaned.fa`, and their content is taken from the
+MAG sequence files you supplied: only removed contigs are dropped.
+
+The summary table reports both the official values and the locally recomputed values,
+together with before/after comparison and the exact list of removed contigs:
 
 ```
 MAG    Contigs_Original  Contigs_Kept  Removed_Contigs          Report_Completeness  Report_Contamination  Recalc_Completeness_Original  Recalc_Completeness_Cleaned  Recalc_Contamination_Original  Recalc_Contamination_Cleaned  Length_Before_bp  Length_After_bp  Quality_Class
@@ -160,292 +354,252 @@ MAG_B  18                18                                     99.85           
 MAG_C  20                14            X01,X03,X05,X07,X09,X11  71.1                 6.96                  71.1                          63.99                        6.96                           0                             2287152           1581221          Medium quality (MQ)
 ```
 
-导出表里的数值一律**机器可读**:质量等级用英文标签、长度用 bp 整数、另附 `Length_Share` 百分比列。
+All exported values are machine-readable: quality classes use English labels, lengths are
+integer bp, and a `Length_Share` percentage column is included.
 
-`checkm2_web_contigs.tsv` 是逐 contig 的完整明细(是否保留 / 判断结论 / 长度 / 长度占比 /
-CDS / KO / Hi-C 内外信号 / 丰度余弦 / 移除后预测 / 重复于哪些 MAG)。
+**Export ZIP** produces the same content as a single timestamped archive
+(`metadrop_results_YYYYMMDD-HHMMSS.zip`) and never touches the output directory. When the
+local helper is running, the archive is staged in the system temporary directory
+(`%TEMP%/metadrop-export/<token>/`) and fetched from there; the status bar reports the
+true path. Staging directories require no manual cleanup — on start-up the helper deletes
+staging directories older than 24 hours, touching only its own subdirectories under
+`metadrop-export`.
 
----
+Archives are produced by a dependency-free ZIP writer (`js/zip.js`, using `deflate-raw`
+with a `store` fallback). `tools/test_zip.mjs` validates the byte stream independently by
+unpacking it with Python's standard-library `zipfile`.
 
-## 3. 输入数据契约
+> **Where results are written.** The output destination is resolved in three tiers, in
+> descending order of preference:
+>
+> | Situation | "Write results" performs | How to set the destination |
+> | --- | --- | --- |
+> | Local helper running (`node tools/serve.mjs`) | POSTs to the helper process and writes to an **absolute path on this host** | Type a path and press Enter, or use **Browse…** for the native folder dialog |
+> | Browser only | Writes through a File System Access directory handle | Use **Browse…** to select a directory |
+> | Neither | **Packages a single ZIP download** and states the reason in the status bar | — |
+>
+> The status bar always reports where output actually went, and a **Local write** badge is
+> shown while the helper is available, so the destination can never appear to be set when
+> it is not.
 
-应用会按文件名自动归类,不需要配置。若某类缺失,对应功能自动降级并给出提示。
-
-### 3.1 CheckM2 结果目录(**必需**)
-
-```
-checkm2_out/
-├── quality_report.tsv                    # 官方报告,用作对比基线
-├── protein_files/<MAG名>.faa             # Prodigal 预测的蛋白
-└── diamond_output/DIAMOND_RESULTS*.tsv   # DIAMOND 比对结果(KO 注释)
-```
-
-- `quality_report.tsv`:`checkm2 predict` 默认输出,列名需含
-  `Name / Completeness / Contamination / Completeness_Model_Used`,
-  其余列(`Contig_N50 / Genome_Size / GC_Content / …`)会显示在界面上。
-- `DIAMOND_RESULTS.tsv`:每行 `{bin}Ω{蛋白id}\t{UniRef}~{KO}\t...`。
-  官方用 `Ω`(U+03A9)分隔 bin 与蛋白;若被替换成别的分隔符,程序会用已知 bin 名做
-  最长前缀匹配兜底。也支持 `protein2contig.map.tsv` 之类的自定义映射表(两列:`蛋白id  contig`)。
-- **若曾用 `--remove_intermediates` 运行 CheckM2,`diamond_output/` 已被删除**,
-  此时只能算元数据部分,无法复算完整度 —— 需要重新跑一次 CheckM2 并保留中间文件。
-
-### 3.2 MAG 组装文件(**必需**)
-
-`.fna / .fa / .fasta / .fas / .ffn`(可用 gzip)。文件名(去扩展名)即 MAG 名,
-需要与 `quality_report.tsv` 的 `Name` 对上。
-
-**序列文件是 contig 集合的唯一权威来源。** 界面里列出的 contig、以及"清理后"写出的
-`<MAG>.cleaned.fa`,都以这里记录的 contig 为准:
-
-- 蛋白文件(`.faa`)与 DIAMOND 结果只用来补充基因层信息(CDS / KO 计数),
-  不会凭空造出 contig;
-- 某条蛋白指向了序列文件里不存在的 contig,会被记为孤儿并忽略(状态栏给出提示);
-- 报告里有、但没有任何序列文件的 bin 会被跳过并提示,而不是伪装成 0 条 contig;
-- 如果一个 MAG 序列都读不到,直接报错,不会给你一个看起来能用的空结果。
-
-> 只读序列统计量(长度、GC),不把整条序列常驻内存;导出清理结果时才重新流式过滤。
-
-### 3.3 Hi-C 信号表(强烈建议)
-
-`hic/*.tsv` 或文件名含 `hic / contact / link`。两种格式都支持:
-
-```tsv
-# 边表(推荐)
-contig_a	contig_b	signal
-k141_51	k141_88	412
-```
-```tsv
-# 稠密矩阵(行列为 contig 名)
-        k141_51  k141_88  k141_93
-k141_51     0       412      18
-```
-
-### 3.4 丰度表(强烈建议)
-
-文件名含 `abund / coverage / coverm / tpm / rpkm / count`,第一列是 contig 标识、其余为样本。
-coverM 风格的 `*.Mean` / `*.Coverage` 列会自动识别(优先取 `Mean`)。
+For large results prefer the output-directory route: ZIP building requires the whole
+result in memory, and above approximately 1.5 GB the application advises switching to
+direct writing rather than letting the browser fail silently. Direct writing is
+**streaming** — output is produced and sent file by file, so peak memory is that of a
+single file.
 
 ---
 
-## 4. 复算是怎么做到和官方一致的
-
-CheckM2 并不是 CheckM1 那种"数标记基因",而是**机器学习模型**。
-本应用把官方仓库里的全部模型文件镜像到浏览器,用等价的数值实现复现:
-
-| 环节 | 官方实现 | 本项目 |
-| --- | --- | --- |
-| 特征向量 | 21241 维:`20 种氨基酸计数 + AALength + CDS` + `19999 KO 计数` + `416 通路 + 757 模块 + 47 类别` 完整度 | `js/engine.js` `fillFeatures()` |
-| 完整度(通用) | LightGBM `general_model_COMP.gbm`(450 棵树,目标 `regression sqrt` → 预测值 = `raw·|raw|`) | `wasm-core/src/lib.rs` `c2_gbm_predict` |
-| 完整度(特定) | Keras CNN `specific_model_COMP.keras`(4×Conv1D + BN + Dense) | `c2_nn_forward` |
-| 污染度 | LightGBM `model_CONT.gbm` | `c2_gbm_predict` |
-| 归一化 | sklearn `MinMaxScaler` | `c2_minmax_transform` |
-| 模型选择 | 与 5300 个参考基因组做最大余弦相似度 → `cosine_decider` | **不实现**(见下):沿用报告写明的模型;报告缺失时退化,不打包那 47 MB 参考库 |
-
-**数值一致性(全部有自动化测试覆盖)**
-
-| 项目 | 误差 |
-| --- | --- |
-| GBDT vs 官方 LightGBM | `0`(逐元素) |
-| CNN vs 官方 Keras | `< 1e-10` |
-| WASM vs 纯 JS | `0`(GBDT/分组)、`2.5e-11`(CNN) |
-| 真实训练基因组端到端 | `0` |
-
-`tools/test_engine.mjs`(24 项)与 `tools/test_pipeline.mjs`(32 项)全部通过。
-
-### 4.1 已移除的能力:余弦模型选择
-
-官方 CheckM2 会先拿查询基因组与 5300 个训练基因组比余弦相似度,再按
-`novelty_ratio = general / cosine²` 决定完整度取 general 还是 specific
-(`modelPostprocessing.cosine_decider`)。这一步需要一份 47 MB 的参考矩阵
-(`ref_csr.bin`),**本项目已不再打包它**,因此:
-
-- **有** `quality_report.tsv` 时:沿用报告里 `Completeness_Model_Used` 写明的模型。
-  官方也是这么取值的,所以"移除前"的复算与报告逐位一致、可比较 —— 这也是主流程。
-- **缺**报告时:无从计算 novelty,退化为 `CheckM2Engine.pickModelFallback()`。
-  它保留官方判断里不依赖余弦的那一半(平均完整度 < 55 且 AA/完整度比值 < 1500
-  → 直接取 general,与官方同分支同结论),其余情况取两模型均值,
-  并把 `modelSource` 标成 `no-report`,不冒充成官方行为。
-
-换来的是:首屏少下 47 MB、内存少驻留 47 MB,离线单文件版从 21.4 MB 降到 11.7 MB。
-需要把这份能力找回来时,`python tools/export_assets.py` 能从 CheckM2 官方数据
-重新导出 `assets/ref_csr.bin`(开发脚本 `make_demo_data.py` / `validate_end2end.py`
-正是靠它;要让运行时重新计算余弦,还得把 `engine.js` 的读取与 `c2_cosine_max` 加回来)。
-
-**增量重算**:每个 contig 存一份稀疏贡献(氨基酸、AALength、CDS、KO 计数),
-于是"去掉任意一批 contig"只需 `counts = baseCounts − Σ贡献`,再跑一次模型。
-单次含 CNN 的"移除并重算"约 **9 ～ 12 ms**,200 个 contig 全量预计算约 2.4 s。
-
----
-
-## 5. 判断逻辑
-
-### 5.1 归属证据分 `placement`(0 ～ 1)
-
-```
-placement = 0.55 × Hi-C 外向占比 + 0.45 × (1 − 丰度余弦)
-```
-
-刻意**不使用完整度增量**。原因是污染物常与宿主共享部分单拷贝基因,
-把它移掉时完整度看起来反而会掉 —— 那是被它自己"垫高"的假象,
-只看 Δ完整度会系统性漏判。
-
-缺 Hi-C 用 0.35、缺丰度用 0.15 作中性缺省,保证缺表时不会乱判。
-
-### 5.2 结论
-
-| 结论 | 触发条件 | 含义 |
-| --- | --- | --- |
-| **重复 bin** | 同名 contig 出现在 ≥ 2 个 MAG | 必须在其中一边删掉;保留哪边由贴合度投票决定 |
-| **疑似污染** | `placement ≥ 0.60` | Hi-C 与丰度都指向"它不属于这里" |
-| **归属存疑** | `0.42 ≤ placement < 0.60` | 建议人工复核 |
-| **核心成员** | `placement < 0.42` 且移除掉完整度 ≥ 0.2 | 建议保留 |
-| 中性 | 其余 | 无明显信号 |
-
-### 5.3 自动建议如何决定"重复 contig 留在哪个 MAG"
-
-对每个重复 contig,在它的所有宿主 MAG 中算贴合度:
-
-```
-fit = (1 − Hi-C 外向占比) × 0.5 + 丰度余弦 × 0.5 + (有独有 KO ? 0.15 : 0)
-```
-
-`fit` 最高者保留,其余 MAG 标为移除。
-
----
-
-## 6. 目录结构
+## 7. Repository layout
 
 ```
 app/
-├── index.html            三栏界面
-├── css/app.css           浅色主题样式
+├── index.html            three-pane interface
+├── css/app.css           light theme
 ├── js/
-│   ├── app.js            主控:加载、渲染、交互、输出
-│   ├── analyze.js        归属证据 / 结论 / 自动建议
-│   ├── dataset.js        把解析结果组装成 MAG/contig 数据模型
-│   ├── engine.js         CheckM2 复算引擎(WASM 优先,纯 JS 兜底)
-│   ├── localio.js        对接本地服务:探测 / 直写文件 / 暂存 ZIP / 打开文件夹
-│   ├── parsers.js        四类输入的解析
-│   ├── packed.js         紧凑二进制资产解析 + WASM 装载
-│   └── zip.js            零依赖 ZIP 打包器(deflate-raw + store 兜底)
-├── wasm-core/src/lib.rs  Rust 计算内核(GBDT / CNN / 分组 / MinMax)
-├── assets/               模型资产(~7 MB)
-├── samples/demo/         演示数据(含自造的重复与污染)
-├── dist/                 离线单文件产物(build_offline.mjs 生成,已在 .gitignore)
+│   ├── app.js            controller: loading, rendering, interaction, output
+│   ├── analyze.js        placement evidence, verdicts, auto-suggestion
+│   ├── dataset.js        assembles parsed input into a MAG/contig data model
+│   ├── engine.js         CheckM2 recomputation engine (WASM first, pure-JS fallback)
+│   ├── localio.js        local helper client: probe, direct write, ZIP staging, open folder
+│   ├── parsers.js        parsers for the four input categories
+│   ├── packed.js         compact binary asset decoding and WASM loading
+│   └── zip.js            dependency-free ZIP writer (deflate-raw with store fallback)
+├── wasm-core/src/lib.rs  Rust computation core (GBDT, CNN, grouping, MinMax)
+├── assets/               model assets (6.8 MB)
+├── samples/demo/         demonstration dataset (synthetic duplication and contamination)
+├── dist/                 single-file build output (generated; git-ignored)
 └── tools/
-    ├── serve.mjs             本地服务:静态托管 + 直写磁盘 API + 启动清理旧暂存(零依赖)
-    ├── export_assets.py      官方模型 → 浏览器二进制
-    ├── validate_engine.py    与官方 LightGBM/Keras 数值对比
-    ├── validate_end2end.py   端到端基准(真实训练基因组)
-    ├── make_demo_data.py     生成演示数据
-    ├── make_demo_report.mjs  用引擎生成 quality_report.tsv
-    ├── test_engine.mjs       引擎回归(24 项)
-    ├── test_pipeline.mjs     端到端无头测试(32 项)
-    ├── test_zip.mjs          ZIP 打包器回归,用 Python zipfile 交叉校验(19 项)
-    ├── test_local_api.mjs    本地服务端到端 + 安全边界(39 项)
-    ├── check_i18n.mjs        中英词典一致性 + 漏翻扫描 + 属性 key 校验(8 项)
-    ├── build_offline.mjs     打成单个 HTML(含产出自检)
-    ├── check_offline.mjs     离线单文件全流程验证,不需服务器(24 项)
-    └── browser_check.mjs     真实 Chromium 界面回归(需静态服务器;17 节 153 项)
+    ├── serve.mjs             local helper: static hosting, direct-write API, start-up cleanup
+    ├── build_offline.mjs     single-file build (with output self-check)
+    ├── check_offline.mjs     offline single-file end-to-end verification (21 assertions)
+    ├── check_i18n.mjs        dictionary consistency, missing-translation and attribute-key checks (8)
+    ├── test_engine.mjs       engine regression against reference models (24)
+    ├── test_pipeline.mjs     headless end-to-end pipeline (32)
+    ├── test_zip.mjs          ZIP writer, cross-checked with Python zipfile (19)
+    ├── test_local_api.mjs    local helper end-to-end and security boundaries (39)
+    ├── browser_check.mjs     real-Chromium interface regression (17 sections, 153)
+    ├── export_assets.py      official model files → browser binaries
+    ├── validate_engine.py    numerical comparison against LightGBM/Keras
+    ├── validate_end2end.py   end-to-end benchmark on real training genomes
+    ├── make_demo_data.py     regenerates the demonstration dataset
+    └── make_demo_report.mjs  regenerates quality_report.tsv using the engine
 ```
 
-### 重新构建
+---
+
+## 8. Demonstration dataset
+
+The counts in `samples/demo/` are **not random**. They are derived from CheckM2's own
+training genomes by de-scaling `assets/ref_csr.bin` to recover genuine amino-acid
+compositions and KO counts. Because that matrix is no longer distributed with the
+application (Section 4.2), regenerating the dataset requires first re-exporting it with
+`python tools/export_assets.py`; the existing `samples/demo/` is unaffected.
+
+Three situations are constructed deliberately:
+
+| MAG | Composition | Official report | Expected action | After cleaning |
+| --- | --- | --- | --- | --- |
+| `MAG_A` | 28 contigs of genome X + **2 contaminating contigs of Z** | 95.15 / 6.56 | remove Z19, Z20 | **92.87 / 0.00** |
+| `MAG_B` | genome Y, complete | 99.85 / 0.71 | no action | 99.85 / 0.71 |
+| `MAG_C` | 14 contigs of Z + **6 contigs of X (duplicated with MAG_A)** | 71.10 / 6.96 | remove the 6 X contigs | **63.99 / 0.00** |
+
+The Hi-C table is generated to be strong within a genome and weak across genomes, and
+each genome is given a distinct abundance profile, so the Z-derived contaminants
+linkage strongly toward MAG_C and deviate markedly from MAG_A's profile.
+
+> The fall in `MAG_C` completeness from 71.10 to 63.99 is **correct**. 63.99 is its true
+> completeness as a Z-only bin; part of the original 71.10 was inflated by the six
+> foreign X contigs.
+
+---
+
+## 9. Security and privacy
+
+- All computation happens in the browser (WebAssembly core with a JavaScript fallback);
+  there is no server-side computation.
+- The local helper binds `127.0.0.1` only, validates the `Host` header to mitigate DNS
+  rebinding, and admits cross-origin requests solely from localhost origins. It is not
+  reachable from other machines on the network.
+- Even with the helper in use, bytes move between a browser and another process **on the
+  same machine** and do not leave the host.
+- The interface contains no telemetry, no CDN and no external request. The offline build
+  is asserted to make zero HTTP(S) requests.
+- Output filenames are sanitised server-side and flattened with `path.basename`, so path
+  traversal sequences such as `../` cannot escape the output directory. These boundaries
+  are asserted in `tools/test_local_api.mjs`.
+
+---
+
+## 10. Testing
+
+Six suites run without any server (143 assertions total; the offline suite contributes 21
+per run because two mutually exclusive output paths are covered):
 
 ```bash
-# 1) 导出模型资产(需要参考 CheckM2 仓库与 Python 环境)
-#    这一步会顺带导出 assets/ref_csr.bin(47 MB 参考矩阵)。它不参与应用运行,
-#    只被 make_demo_data.py / validate_end2end.py 用来重造演示数据与端到端基准;
-#    不打算重造演示数据就加 --skip-ref 跳过它。
-python tools/export_assets.py
-python tools/validate_engine.py
-python tools/validate_end2end.py
+node tools/test_engine.mjs       # 24 — model outputs against the reference implementations
+node tools/test_pipeline.mjs     # 32 — parsing → annotation → suggestion → cleaning
+node tools/test_zip.mjs          # 19 — archive byte stream, unpacked by Python zipfile
+node tools/test_local_api.mjs    # 39 — direct writing, Host/origin/traversal boundaries, probe self-heal
+node tools/check_i18n.mjs        #  8 — dictionary alignment, translation coverage, attribute keys
+node tools/check_offline.mjs     # 21 — single-file full pipeline over file://, zero network
+```
 
-# 2) 编译 WASM 内核
-cd wasm-core
-RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/checkm2_core.wasm ../wasm/
+An interface regression suite drives a real browser through the complete workflow
+(17 sections, 153 assertions):
 
-# 3) 演示数据(需要第 1 步导出的 ref_csr.bin,它是计数来源)
-cd .. && python tools/make_demo_data.py && node tools/make_demo_report.mjs
-
-# 4) 离线单文件
-node tools/build_offline.mjs
-
-# 5) 测试 —— 以下六套都不需要起任何服务器(共 146 项断言)
-node tools/test_engine.mjs                 # 24 项:模型数值与官方一致
-node tools/test_pipeline.mjs               # 32 项:解析 → 标注 → 建议 → 清理
-node tools/test_zip.mjs                    # 19 项:ZIP 字节流,Python zipfile 独立解包
-node tools/test_local_api.mjs              # 39 项:直写落盘 + Host/跨域/穿越 边界 + 探针自愈
-node tools/check_i18n.mjs                  #  8 项:中英词典对齐、无漏翻、属性 key 有效
-node tools/check_offline.mjs               # 24 项:单文件版 file:// 全流程、零网络
-
-# 6) 界面回归(需要先起任意静态服务器;17 节 153 项)
+```bash
 python -m http.server 8765 &
 node tools/browser_check.mjs
 ```
 
-`browser_check.mjs` 与 `check_offline.mjs` 都依赖 `playwright-core` 与一个 Chrome,
-会自动探测 `CHROME_PATH` 环境变量、`~/.agent-browser/browsers/chrome-<版本>/chrome.exe`,
-或 `playwright-core` 自带的 chromium;截图输出到 `tools/browser_shots/`。
-`--headful` 可看着它跑,`--skip-offline` 可跳过单文件那一段。
+`browser_check.mjs` and `check_offline.mjs` require `playwright-core` and a Chrome
+installation. Both locate them automatically via the `CHROME_PATH` environment variable,
+`~/.agent-browser/browsers/chrome-<version>/chrome.exe`, or the chromium bundled with
+`playwright-core`. Screenshots are written to `tools/browser_shots/`. Use `--headful` to
+watch the run and `--skip-offline` to omit the single-file section.
 
-界面回归的**第 17 节**专门走本地服务:自己起一个 `serve.mjs`(随机端口)、跑完收掉,
-验证「完成输出」确实把 5 个结果文件**直写到你指定的磁盘目录**(含内容比对、无下载事件),
-改路径即时生效,「选择…」在弹不出原生对话框时**优雅退化为手填提示**并聚焦输入框,
-「打开文件夹」按钮有输出后才出现,以及全流程没有任何未捕获异常。
+**What the assertions actually check.** Section 17 of `browser_check.mjs` exercises the
+local helper: it starts a `serve.mjs` on a random port, tears it down afterwards, and
+verifies that **Write results** places the five expected files on the disk directory you
+specified, comparing their contents and confirming that no download event occurred. It
+also asserts that changing the path takes effect immediately, that **Browse…** degrades
+gracefully to a typed-path prompt (focusing the input) when a native dialog cannot be
+shown, that **Open folder** appears only once output exists, and that the workflow
+produces no uncaught exceptions.
 
-> 提示:`npm i -g agent-browser && agent-browser install` 会顺带装好一个 Chrome,
-> 但本项目的测试只依赖 `playwright-core`,不依赖 agent-browser 的守护进程。
-
----
-
-## 7. 演示数据构造
-
-`samples/demo/` 的计数全部来自 CheckM2 官方训练基因组(从 `assets/ref_csr.bin`
-反缩放还原出真实的氨基酸组成与 KO 计数),不是随机数。
-⚠️ 该参考矩阵已不再随应用分发(见 §4.1);要重造演示数据,先跑
-`python tools/export_assets.py` 把它导回来。已生成的 `samples/demo/` 不受影响。
-
-刻意构造了三种情况:
-
-| MAG | 组成 | 官方报告 | 期望操作 | 清理后 |
-| --- | --- | --- | --- | --- |
-| `MAG_A` | 基因组 X 的 28 条 + **Z 的 2 条污染** | 95.15 / 6.56 | 移除 Z19、Z20 | **92.87 / 0.00** |
-| `MAG_B` | 基因组 Y 完整 | 99.85 / 0.71 | 无需操作 | 99.85 / 0.71 |
-| `MAG_C` | Z 的 14 条 + **X 的 6 条(与 MAG_A 重复)** | 71.10 / 6.96 | 移除 6 条 X contig | **63.99 / 0.00** |
-
-Hi-C 表按"同基因组内强、跨基因组弱"生成,丰度表给三个基因组不同的样本谱 ——
-所以 Z 污染 contig 的 Hi-C 会强烈指向 MAG_C、丰度谱也明显偏离 MAG_A。
-
-> `MAG_C` 完整度从 71.10 降到 63.99 是**正确**的:63.99 才是它真实的
-> "只含 Z"的完整度,71.10 里有一部分是被那 6 条外来 X contig 垫高的。
+The engine comparisons are the foundation of the project: GBDT outputs must match official
+LightGBM exactly, and CNN outputs must match Keras to better than 1e-10.
 
 ---
 
-## 8. 已知限制
+## 11. Rebuilding from source
 
-- **不提供 contig 级 CheckM2**。CheckM2 本身只在 bin 层面给完整度/污染度;
-  悬停卡片里的数字是"**移除该 contig 后整个 MAG 的**预测值",这是唯一有意义的解读。
-- **需要 `diamond_output/`**。若 CheckM2 用了 `--remove_intermediates`,KO 计数无从重建,
-  应用会提示重新运行。
-- **模型选择不含余弦判定**。官方那一步要拿查询基因组和 5300 个训练基因组比余弦,
-  需要 47 MB 参考矩阵,本项目不打包它(§4.1):有报告就沿用报告里的模型,
-  缺报告时取两模型均值并把 `modelSource` 标成 `no-report`。
-- **contig N50 / Coding Density** 用的是 CheckM2 自己的定义(N50 为"按长度加权后的中位数"),
-  与常见的 N50 定义不同,报告生成器已对齐官方实现。
-- Hi-C 每个 contig 只保留最强的 20 个伙伴(`parseHic` 的 `topPartners`),避免稠密矩阵撑爆内存。
-- **离线单文件版约 11.7 MB**。其中演示数据 `demo.json` gzip 后占 ~3.7 MB,
-  打开时要在浏览器里解压,首次加载比开发版略慢(实测约 0.3 s)。
-- **`file://` 下拿不到"输出文件夹"手柄**。不透明源里没有可用的目录句柄,
-  点「选择…」会明确说明这条路走不通并建议改用「导出 ZIP」。
-  想在 `file://` 下直写磁盘,目前只有一条路:另外跑一个 `serve.mjs`
-  (它会监听 `127.0.0.1:8788`,页面会自动探到)。
-- **没起本地服务时,控制台会有一条 `/__local__/ping` 的失败请求**。
-  这是"探测本机有没有 metadrop 服务"的代价 —— 网页无法在不发请求的情况下
-  知道某个本地端口上跑着什么。它不影响功能,只是会在 DevTools 里留一条记录。
-- **ZIP 打包需要整份结果进内存**。超过约 1.5 GB 会明确劝阻并建议改走输出文件夹直写;
-  直写那条路是**边生成边发**的,峰值内存只有单个文件。
-- **改输出路径只在本地服务在线时可用**。浏览器出于安全考虑不暴露目录的绝对路径,
-  所以那一路只能显示目录名、不能用路径字符串指定。
-#   m e t a d r o p  
- 
+```bash
+# 1) Export model assets (requires a local CheckM2 checkout and a Python environment).
+#    This step also exports assets/ref_csr.bin (47 MB). That matrix does not take part in
+#    running the application; it is used only by make_demo_data.py and validate_end2end.py
+#    to regenerate the demonstration data and the end-to-end benchmark. Pass --skip-ref
+#    to omit it if you do not intend to regenerate them.
+python tools/export_assets.py
+python tools/validate_engine.py
+python tools/validate_end2end.py
+
+# 2) Build the WebAssembly core
+cd wasm-core
+RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/checkm2_core.wasm ../wasm/
+
+# 3) Demonstration data (requires ref_csr.bin from step 1, which is its count source)
+cd .. && python tools/make_demo_data.py && node tools/make_demo_report.mjs
+
+# 4) Single-file build
+node tools/build_offline.mjs
+
+# 5) Tests — none of the following require a server
+node tools/test_engine.mjs
+node tools/test_pipeline.mjs
+node tools/test_zip.mjs
+node tools/test_local_api.mjs
+node tools/check_i18n.mjs
+node tools/check_offline.mjs
+
+# 6) Interface regression (requires a static server to be running first)
+python -m http.server 8765 &
+node tools/browser_check.mjs
+```
+
+A Rust toolchain is required only for step 2. The compiled
+`wasm/checkm2_core.wasm` is committed, so step 2 is necessary only when modifying
+`wasm-core/src/lib.rs`.
+
+---
+
+## 12. Known limitations
+
+- **No contig-level CheckM2.** CheckM2 itself reports completeness and contamination only
+  at bin level. The figures shown on hover are the predicted quality of **the whole MAG
+  after that contig is removed**, which is the only meaningful interpretation available.
+- **`diamond_output/` is required.** If CheckM2 was run with `--remove_intermediates`,
+  KO counts cannot be reconstructed and the application asks for a re-run.
+- **Model selection excludes the cosine criterion.** Upstream, this step compares the
+  query against 5,300 training genomes and requires the 47 MB reference matrix, which is
+  not shipped here (Section 4.2). With a report the recorded model is reused; without one,
+  the two models are averaged and `modelSource` is set to `no-report`.
+- **Contig N50 and coding density use CheckM2's own definitions.** Its N50 is a
+  length-weighted median, which differs from the common assembly N50; the report generator
+  matches the official implementation.
+- **Hi-C is truncated to the 20 strongest partners per contig** (`topPartners` in
+  `parseHic`) to keep dense matrices from exhausting memory.
+- **The single-file build is 11.2 MB.** The demonstration dataset accounts for about
+  3.7 MB of this and must be decompressed in the browser, so the first load is slightly
+  slower than in the development build.
+- **No output-directory handle is available over `file://`.** Opaque origins expose no
+  usable directory handle, so **Browse…** states plainly that this route is unavailable
+  and recommends **Export ZIP** instead. To write to disk from `file://`, run
+  `serve.mjs` separately; the application will discover it automatically.
+- **Without the local helper, the console records one failed `/__local__/ping` request.**
+  This is the cost of probing whether a helper is running — a web page cannot learn what
+  occupies a local port without sending a request. It does not affect functionality.
+- **ZIP building requires the entire result in memory.** Above roughly 1.5 GB the
+  application advises the output-directory route; direct writing is streaming, so its peak
+  memory is that of a single file.
+- **The output path can only be typed when the local helper is running.** Browsers
+  deliberately do not expose a directory's absolute path, so without the helper only the
+  directory name is displayed.
+
+---
+
+## 13. Citation
+
+If you use Metadrop in published work, please cite the CheckM2 paper for the models it
+reimplements, and the Metadrop application note for the software itself.
+
+Metadrop reproduces the numerical output of CheckM2; the completeness and contamination
+values it reports are the output of the models described in:
+
+> Parks, S. A., Chen, J., Hung, S., & Wu, Z. (2022). CheckM2: assessing the quality of
+> predicted gene contents in metagenomes. *Nature Methods*, 19(3), 320–328.
+> https://doi.org/10.1038/s41592-021-01340-2
+
+A citation for Metadrop itself will be added here on publication.
