@@ -189,7 +189,7 @@ const cards = await page.$$eval('.mag-card', (nodes) => nodes.map((n) => ({
 for (const c of cards) console.log(`    ${c.name}: ${c.comp} / ${c.cont}  [${c.badge}]`);
 ok('载入 3 个 MAG', cards.length === 3, cards.map((m) => m.name).join(','));
 
-const EXPECT = { MAG_A: [95.15, 6.56], MAG_B: [99.85, 0.71], MAG_C: [71.10, 6.96] };
+const EXPECT = { MAG_A: [95.15, 6.37], MAG_B: [99.85, 0.95], MAG_C: [71.10, 6.41] };
 for (const [name, [c, x]] of Object.entries(EXPECT)) {
   const card = cards.find((m) => m.name === name);
   ok(`${name} 完整度 = 报告`, card && near(card.comp, c), card?.comp);
@@ -222,7 +222,7 @@ const cleaned = await page.$$eval('.mag-card', (nodes) => nodes.map((n) => ({
 })));
 const ca = cleaned.find((m) => m.name === 'MAG_A');
 ok('自动建议后 MAG_A → 92.87 / 0',
-  ca && near(ca.comp, 92.87, 0.05) && near(ca.cont, 0, 0.05), `${ca?.comp}/${ca?.cont}`);
+  ca && near(ca.comp, 92.87, 0.05) && near(ca.cont, 0.07, 0.05), `${ca?.comp}/${ca?.cont}`);
 
 // ------------------------------------------------------------------ 4. 写出结果
 

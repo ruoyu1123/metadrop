@@ -66,7 +66,9 @@ def build_group_indices():
     for mn in md_names:
         kos = modules_def.get(mn, [])
         md_denom.append(len(kos))
-        md.append(sorted({pos[k] for k in kos if k in pos}))
+        # 保留重复条目:CheckM2 的定义列表不去重,pandas 重复选列会把重复 KO
+        # 重复计入模块分子(见 features_from_counts 的注释)
+        md.append([pos[k] for k in kos if k in pos])
 
     return (
         feature_order,
@@ -191,22 +193,33 @@ def make_counts(rng, n_ko_present: int, aa_total: float, cds: int) -> np.ndarray
 
 
 def features_from_counts(counts, groups):
+    """按官方 CheckM2 的语义构造特征。
+
+    通路/类别:分子 = "存在"(计数>0)的 KO 数,分母 = 组内映射 KO 数。
+    模块:分子 = **原始计数之和**(官方 calculate_module_completeness 求和用的是
+    未封顶的 KO_gene_data,其 presence_absence_subset 是死代码;且定义列表里
+    重复的 KO 经 pandas 重复选列被重复计入 —— build_group_indices 保留这些重复),
+    分母 = 定义长度。此前这里误用 presence,导致 General 完整度与全部污染度
+    在真实数据上偏离官方(2026-10-12 修复)。
+    """
     _, pw, md, md_denom, ct = groups
     ko = counts[22:N_COUNTS]
-    presence = ko > 0
 
-    def ratio(idxs, denom):
-        return (presence[idxs].sum() / denom) if denom else 0.0
+    def ratio_pw_ct(idxs, denom):
+        return (sum(1 for i in idxs if ko[i] > 0) / denom) if denom else 0.0
+
+    def ratio_md(idxs, denom):
+        return (sum(float(ko[i]) for i in idxs) / denom) if denom else 0.0
 
     vec = np.zeros(N_FEATURES, dtype=np.float64)
     vec[:N_COUNTS] = counts
     off = N_COUNTS
     for idxs in pw:
-        vec[off] = ratio(idxs, len(idxs)); off += 1
+        vec[off] = ratio_pw_ct(idxs, len(idxs)); off += 1
     for i, idxs in enumerate(md):
-        vec[off] = ratio(idxs, md_denom[i]); off += 1
+        vec[off] = ratio_md(idxs, md_denom[i]); off += 1
     for idxs in ct:
-        vec[off] = ratio(idxs, len(idxs)); off += 1
+        vec[off] = ratio_pw_ct(idxs, len(idxs)); off += 1
     assert off == N_FEATURES
     return vec
 

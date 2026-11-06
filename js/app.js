@@ -15,6 +15,7 @@ import { CheckM2Engine, mimagClass } from './engine.js';
 import { Dataset } from './dataset.js';
 import {
   annotateDataset, suggestRemovals, summarizeWork, fmtBytes, reasonText, verdictLabel, VERDICTS,
+  computeImpactFor, ensureImpactsForEvidence,
 } from './analyze.js';
 import { collectFiles, streamLines } from './parsers.js';
 import { applyStatic, getLang, onLangChange, setLang, t } from './i18n.js';
@@ -144,6 +145,7 @@ const state = {
   contigFilter: '',
   onlyFlagged: false,
   hoverCache: new Map(),
+  bgToken: 0,         // 后台预计算的世代号:换数据/重置时 +1 使旧循环自行退出
   busy: false,
   outDir: null,       // FileSystemDirectoryHandle(浏览器直写那条路)
   localOutPath: '',   // 本地服务那条路:用户指定的绝对路径
@@ -236,8 +238,12 @@ async function buildFromFiles(fileMap, label) {
   });
 
   setProgress(0.6, { key: 'status.annotate' });
+  // deferImpact:不再一次性预计算全部 contig 的"移除后"值 —— 大基因组要几十分钟。
+  // 展示先行;悬停/点击时按需即时计算(hoverPrediction 本来就是即时算的),
+  // 余下的由 startBackgroundImpact 分块慢慢补全。
   await annotateDataset(ds, {
     onProgress: (f, msg) => setProgress(0.6 + f * 0.35, msg),
+    deferImpact: true,
   });
 
   // 工作副本:每个 MAG 一份"已移除 contig"集合
@@ -272,7 +278,87 @@ async function buildFromFiles(fileMap, label) {
   const first = ds.magOrder[0];
   if (first) selectMag(first);
   renderMagList();
+  startBackgroundImpact(ds);
 }
+
+// ------------------------------------------------------------------ 后台预计算
+
+/**
+ * 分块补全全部 contig 的 afterRemoval(相对原始状态的口径)。
+ *
+ * 为什么不用 Worker 真多线程:引擎与 210k 条 contig 的贡献表都要复制进每个
+ * worker(资产 6.8MB × N + 贡献表翻倍),换来的加速对"按需计算"场景没意义 ——
+ * 用户真正碰到的 contig 在悬停那一刻 19ms 就算完了。这里用时间片让出主线程,
+ * UI 保持可交互;顺序是当前 MAG 优先,其余按 contig 数升序(小 bin 先完成,
+ * 尽早出现"全部就绪"的 MAG)。
+ */
+function startBackgroundImpact(ds) {
+  stopBackgroundImpact();
+  const token = ++state.bgToken;
+  const order = [...ds.mags.values()].sort((a, b) => a.contigList.length - b.contigList.length);
+  const active = currentMag();
+  if (active) {
+    const i = order.indexOf(active);
+    if (i > 0) { order.splice(i, 1); order.unshift(active); }
+  }
+  const total = order.reduce((a, m) => a + m.contigList.length, 0);
+  if (!total) return;
+  let done = 0;
+  let lastStatus = 0;
+  let lastMag = null;
+
+  (async () => {
+    for (const mag of order) {
+      const useNn = mag.forcedModel !== 'general';
+      let sliceStart = performance.now();
+      let touched = false;
+      for (let i = 0; i < mag.contigList.length; i++) {
+        if (token !== state.bgToken) return;   // 数据集已切换/重置
+        const c = mag.contigList[i];
+        if (!c.afterRemoval) {
+          // computeImpactFor 内部有缓存,顺带把 core/neutral 的定级补齐
+          computeImpactFor(state.engine, mag, c);
+          touched = true;
+          done++;
+        }
+        if (performance.now() - sliceStart >= 30) {
+          if (touched && mag === currentMag() && performance.now() - lastRender > 900) {
+            lastRender = performance.now();
+            renderRows();
+          }
+          if (performance.now() - lastStatus > 800) {
+            lastStatus = performance.now();
+            bgStatus(done, total, mag);
+          }
+          // 让出主线程,别把界面卡住
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 0));
+          sliceStart = performance.now();
+          touched = false;
+        }
+      }
+      mag.impactDone = true;
+      if (mag === currentMag()) renderRows();
+      renderMagList();
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (token === state.bgToken) setStatus({ key: 'status.bg.impact.done' });
+  })();
+}
+
+function stopBackgroundImpact() {
+  state.bgToken++;
+}
+
+/** 只在状态栏仍属于"载入/后台"语境时才写后台进度,别覆盖用户的操作反馈 */
+function bgStatus(done, total, mag) {
+  const key = state.statusRef && state.statusRef.key;
+  if (key && key !== 'status.built' && key !== 'status.bg.impact') return;
+  setStatus({ key: 'status.bg.impact', vars: { done, total, mag: mag.name } });
+}
+
+let lastRender = 0;
 
 async function loadDemo() {
   if (state.busy) return;
@@ -411,22 +497,30 @@ function resetAll() {
   setStatus({ key: 'status.resetAll' });
 }
 
-function applySuggestion() {
-  if (!state.ds) return;
-  const suggestion = suggestRemovals(state.ds);
-  for (const mag of state.ds.mags.values()) mag.removedIds.clear();
-  for (const [magName, ids] of suggestion) {
-    const mag = state.ds.mags.get(magName);
-    if (!mag) continue;
-    for (const id of ids) if (mag.contigs.has(id)) mag.removedIds.add(id);
-  }
-  for (const mag of state.ds.mags.values()) recomputeLive(mag);
-  state.hoverCache.clear();
+async function applySuggestion() {
+  if (!state.ds || state.busy) return;
+  state.busy = true;
+  try {
+    // 污染候选的"移除后污染度是否下降"依赖 afterRemoval:deferImpact 模式下
+    // 只为有归属证据的候选按需补算(没有 Hi-C/丰度时候选为 0,瞬时完成)
+    await ensureImpactsForEvidence(state.engine, state.ds);
+    const suggestion = suggestRemovals(state.ds);
+    for (const mag of state.ds.mags.values()) mag.removedIds.clear();
+    for (const [magName, ids] of suggestion) {
+      const mag = state.ds.mags.get(magName);
+      if (!mag) continue;
+      for (const id of ids) if (mag.contigs.has(id)) mag.removedIds.add(id);
+    }
+    for (const mag of state.ds.mags.values()) recomputeLive(mag);
+    state.hoverCache.clear();
 
-  const n = Array.from(suggestion.values()).reduce((a, s) => a + s.size, 0);
-  setStatus(n ? { key: 'status.suggest.n', vars: { n } } : { key: 'status.suggest.none' });
-  renderMagList();
-  renderCenter();
+    const n = Array.from(suggestion.values()).reduce((a, s) => a + s.size, 0);
+    setStatus(n ? { key: 'status.suggest.n', vars: { n } } : { key: 'status.suggest.none' });
+    renderMagList();
+    renderCenter();
+  } finally {
+    state.busy = false;
+  }
 }
 
 // ------------------------------------------------------------------ 悬停预测

@@ -324,7 +324,12 @@ pub unsafe extern "C" fn c2_group_ratios(
         *out.add(gidx) = num / (e - s) as f64;
     }
 
-    // 模块:分母取定义长度(CheckM2 在过滤前先取 len)
+    // 模块:分母取定义长度(CheckM2 在过滤前先取 len)。
+    // 分子必须与官方 CheckM2 逐位一致:是**原始 KO 计数之和**(不是存在数)。
+    // 官方 calculate_module_completeness 虽然先算好了 presence_absence_subset,
+    // 但实际求和用的是未封顶的 KO_gene_data,且定义列表里重复的 KO 会经 pandas
+    // 重复选列而重复计入 —— groups.bin 的 md_idx 保留这些重复,这里直接累加。
+    // 其模型就是用这种特征训练的,按"存在数"算会让 General 完整度与污染度全偏。
     for gidx in 0..n_md {
         let s = i32_at(groups, o.md_off + gidx * 4) as usize;
         let e = i32_at(groups, o.md_off + (gidx + 1) * 4) as usize;
@@ -332,9 +337,7 @@ pub unsafe extern "C" fn c2_group_ratios(
         let mut num = 0.0f64;
         for j in s..e {
             let k = i32_at(groups, o.md_idx + j * 4) as usize;
-            if *ko.add(k) > 0.0 {
-                num += 1.0;
-            }
+            num += *ko.add(k);
         }
         *out.add(n_pw + gidx) = num / denom;
     }

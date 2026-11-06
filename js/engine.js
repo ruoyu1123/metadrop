@@ -223,10 +223,15 @@ export class CheckM2Engine {
     const mdOff = G.md.offsets;
     const mdIdx = G.md.indices;
     const mdDenom = G.md.denom;
+    // 模块分支必须与官方 CheckM2 逐位一致:分子是**原始计数之和**(不是存在数)。
+    // 官方 calculate_module_completeness 里虽然先算好了 presence_absence_subset,
+    // 但实际求和用的是未封顶的 KO_gene_data(且定义列表里重复的 KO 会被 pandas
+    // 重复选列而重复计入 —— groups.bin 的 indices 保留了这些重复)。它的模型就是
+    // 用这种特征训练的, 这里一旦按"存在数"算, General 完整度与全部污染度都会偏。
     for (let g = 0; g < G.nModules; g++) {
       const s = mdOff[g], e = mdOff[g + 1];
       let num = 0;
-      for (let j = s; j < e; j++) if (counts[base + mdIdx[j]] > 0) num++;
+      for (let j = s; j < e; j++) num += counts[base + mdIdx[j]];
       out[o++] = num / mdDenom[g];
     }
 
@@ -241,8 +246,9 @@ export class CheckM2Engine {
     return out;
   }
 
-  /** 每个分组的"存在 KO 数",用于解释去掉 contig 后丢了什么 */
-  groupPresenceCounts(counts, out = new Int32Array(1220)) {
+  /** 每个分组的"分子",用于解释去掉 contig 后丢了什么。
+   *  与 _computeGroups 的分子口径一致:通路/类别 = 存在 KO 数,模块 = 原始计数和。 */
+  groupPresenceCounts(counts, out = new Float64Array(1220)) {
     const G = this.groups;
     const base = G.koOffset;
     let o = 0;
@@ -256,7 +262,7 @@ export class CheckM2Engine {
     for (let g = 0; g < G.nModules; g++) {
       let num = 0;
       for (let j = G.md.offsets[g]; j < G.md.offsets[g + 1]; j++) {
-        if (counts[base + G.md.indices[j]] > 0) num++;
+        num += counts[base + G.md.indices[j]];
       }
       out[o++] = num;
     }

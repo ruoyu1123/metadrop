@@ -192,6 +192,8 @@ const DICT = {
     'status.built.dup': ',{n} 个重复 contig',
 
     'status.annotate': '计算 Hi-C / 丰度 / 重复指标…',
+    'status.bg.impact': '后台预计算移除影响 {done}/{total}({mag} 完成)',
+    'status.bg.impact.done': '后台预计算完成 —— 全部 contig 的影响与定级已就绪',
     'status.exporting': '正在写入输出文件夹…',
     'status.export.genSummary': '生成汇总表…',
     'status.export.mag': '写出 {mag} 清理后的序列…',
@@ -443,6 +445,8 @@ const DICT = {
     'status.built.dup': ', {n} duplicate contigs',
 
     'status.annotate': 'Computing Hi-C / abundance / duplicate metrics…',
+    'status.bg.impact': 'Background precompute: {done}/{total} ({mag} done)',
+    'status.bg.impact.done': 'Background precompute finished — impact and verdicts ready for every contig',
     'status.exporting': 'Writing into the output folder…',
     'status.export.genSummary': 'Building summary table…',
     'status.export.mag': 'Writing cleaned sequence for {mag}…',

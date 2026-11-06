@@ -97,7 +97,7 @@ const ok = (name, pass, detail = '') => {
 };
 const near = (a, b, tol = 0.02) => Math.abs(a - b) <= tol;
 
-const EXPECT = { MAG_A: [95.15, 6.56], MAG_B: [99.85, 0.71], MAG_C: [71.10, 6.96] };
+const EXPECT = { MAG_A: [95.15, 6.37], MAG_B: [99.85, 0.95], MAG_C: [71.10, 6.41] };
 
 // ------------------------------------------------------------------ ZIP 校验
 
@@ -289,9 +289,9 @@ const strip = await page.evaluate(() => ({
   cls: document.getElementById('qs-class').textContent.trim(),
   rep: document.getElementById('qs-report').textContent.trim(),
 }));
-ok('顶部读数与报告一致', near(Number(strip.comp), 95.15) && near(Number(strip.cont), 6.56),
+ok('顶部读数与报告一致', near(Number(strip.comp), 95.15) && near(Number(strip.cont), 6.37),
   `${strip.comp}/${strip.cont}, 报告=${strip.rep}, 等级=${strip.cls}`);
-// 选中的是 MAG_A(95.15/6.56),等级是「中等质量 (MQ)」;
+// 选中的是 MAG_A(95.15/6.37),等级是「中等质量 (MQ)」;
 // 这里只验"是中文标签",不写死具体等级,免得演示数据一变就误报。
 ok('质量等级为中文', /(高质量|中等质量|低完整度|污染超标)/.test(strip.cls), strip.cls);
 await page.screenshot({ path: path.join(SHOTS, '2-demo-loaded.png') });
@@ -358,10 +358,10 @@ await page.screenshot({ path: path.join(SHOTS, '4-removed-one.png') });
 console.log('\n=== 6. 还原本 MAG ===');
 await page.click('#btn-reset');
 await page.waitForFunction(
-  () => document.getElementById('qs-contamination')?.textContent?.trim() === '6.56',
+  () => document.getElementById('qs-contamination')?.textContent?.trim() === '6.37',
   null, { timeout: 30000 },
 );
-ok('还原后污染度回到 6.56', true);
+ok('还原后污染度回到 6.37', true);
 
 // ================================================================ 7
 
@@ -383,7 +383,7 @@ console.log('  ---- 清理后 ----');
 for (const c of cleaned) console.log(`    ${c.name}: ${c.comp} / ${c.cont}  [${c.badge}]`);
 const a = cleaned.find((m) => m.name === 'MAG_A');
 const cc = cleaned.find((m) => m.name === 'MAG_C');
-ok('MAG_A → 92.87 / 0.00', a && near(Number(a.comp), 92.87, 0.05) && near(Number(a.cont), 0.00, 0.05),
+ok('MAG_A → 92.87 / 0.07', a && near(Number(a.comp), 92.87, 0.05) && near(Number(a.cont), 0.07, 0.05),
   `${a?.comp}/${a?.cont}`);
 ok('MAG_C → 63.99 / 0.00', cc && near(Number(cc.comp), 63.99, 0.05) && near(Number(cc.cont), 0.00, 0.05),
   `${cc?.comp}/${cc?.cont}`);
@@ -709,7 +709,7 @@ const sumLines = sumText.trim().split('\n');
   const a2 = rows.find((r) => r.MAG === 'MAG_A');
   ok('汇总表 MAG_A 完整度 92.87', near(Number(a2?.Recalc_Completeness_Cleaned), 92.87, 0.05),
     a2?.Recalc_Completeness_Cleaned);
-  ok('汇总表 MAG_A 污染度 0', near(Number(a2?.Recalc_Contamination_Cleaned), 0, 0.05),
+  ok('汇总表 MAG_A 污染度 0.07', near(Number(a2?.Recalc_Contamination_Cleaned), 0.07, 0.05),
     a2?.Recalc_Contamination_Cleaned);
   ok('汇总表 contig 30→28', a2?.Contigs_Original === '30' && a2?.Contigs_Kept === '28',
     `${a2?.Contigs_Original}→${a2?.Contigs_Kept}`);
@@ -844,7 +844,7 @@ if (!SKIP_OFFLINE && fs.existsSync(OFFLINE_HTML)) {
   );
   const offCleaned = await readCards(off.page);
   const offA = offCleaned.find((m) => m.name === 'MAG_A');
-  ok('离线版自动建议结果一致', offA && near(Number(offA.comp), 92.87, 0.05) && near(Number(offA.cont), 0, 0.05),
+  ok('离线版自动建议结果一致', offA && near(Number(offA.comp), 92.87, 0.05) && near(Number(offA.cont), 0.07, 0.05),
     `${offA?.comp}/${offA?.cont}`);
 
   // 关键:整个流程一个网络请求都不该有

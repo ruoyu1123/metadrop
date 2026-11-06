@@ -12,6 +12,10 @@ tools/browser_shots/
 # 离线单文件产物(20MB,可随时重跑 tools/build_offline.mjs 生成)
 dist/
 
+# 余弦相似度参考数据(45MB,不随应用分发;需要时重跑
+# python tools/export_assets.py,不加 --skip-ref 即可再生)
+assets/ref_csr.bin
+
 # 说明:assets/(模型与参考数据 ~52MB)与 samples/(演示数据 ~11MB)是"开箱即用"的
 # 必要组成,因此**不**忽略 —— 否则新克隆的仓库必须先跑一遍导出脚本才能用。
 

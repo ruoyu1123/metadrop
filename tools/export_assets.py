@@ -305,9 +305,11 @@ def export_groups(ck2: Path, dst_bin: Path, dst_names: Path, feature_order: dict
     """把 KO->通路/类别映射与模块定义转成 KO 特征下标分组。
 
     对应 CheckM2 的 KeggCalculator.calculate_KO_group / calculate_module_completeness:
-      * KO 计数先二值化(>1 记 1)
-      * 通路/类别: 分子 = 该组内"存在"的 KO 数, 分母 = 该组定义的 KO 数
-      * 模块: 分母取定义长度(过滤前!), 分子为映射到的 KO 数
+      * 通路/类别: 分子 = 该组内"存在"(计数 > 0)的 KO 数, 分母 = 该组定义的 KO 数
+      * 模块: 分母取定义长度(过滤前!), 分子 = 该组 KO 的 **原始计数之和**(不是存在数!)
+        —— CheckM2 的 calculate_module_completeness 虽然先算好了 presence_absence_subset,
+        但实际求和用的是未封顶的原始计数(且定义里重复的 KO 会经 pandas 重复选列
+        而被重复计入)。模型就是用这种特征训练的, 这里必须逐位复刻。
     """
     KO_LIST = feature_order["KO_Genes"]
     ko_pos = {ko: i for i, ko in enumerate(KO_LIST)}
@@ -345,7 +347,10 @@ def export_groups(ck2: Path, dst_bin: Path, dst_names: Path, feature_order: dict
     for mn in feature_order["KO_Modules"]:
         kos = modules_def.get(mn, [])
         modules_denom.append(len(kos))                    # 分母 = 定义长度(未过滤)
-        modules.append(sorted({ko_pos[k] for k in kos if k in ko_pos}))
+        # 不去重、不排序:CheckM2 的 module_definitions 里重复的 KO 会被 pandas
+        # 重复选列、重复计入分子(原始计数和),这里必须保留才能与其数值对齐。
+        # 见 calculate_module_completeness:KO_gene_data[定义列表].sum(axis=1) / length
+        modules.append([ko_pos[k] for k in kos if k in ko_pos])
     n_zero_denom = sum(1 for d in modules_denom if d == 0)
     if n_zero_denom:
         print(f"  · {n_zero_denom} 个模块定义为空(CheckM2 中会产生 0/0 -> NaN)")

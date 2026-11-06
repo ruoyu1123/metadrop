@@ -257,27 +257,53 @@
     ],
     "modules_indices": [
      84716,
-     19172
+     19424
     ],
     "modules_denom": [
-     103888,
+     104140,
      3028
     ],
     "categories_offsets": [
-     106916,
+     107168,
      192
     ],
     "categories_indices": [
-     107108,
+     107360,
      79996
     ]
    },
-   "bytes": 187104,
+   "bytes": 187356,
    "file": "groups.bin",
    "n_pathways": 416,
    "n_modules": 757,
    "n_categories": 47,
-   "n_group_ko_refs": 44791
+   "n_group_ko_refs": 44854
+  },
+  "ref": {
+   "layout": {
+    "indptr": [
+     16,
+     21204
+    ],
+    "indices": [
+     21220,
+     15901378
+    ],
+    "data": [
+     15922598,
+     31802756
+    ],
+    "norms": [
+     47725354,
+     21200
+    ]
+   },
+   "bytes": 47746554,
+   "file": "ref_csr.bin",
+   "n_rows": 5300,
+   "n_cols": 20021,
+   "nnz": 7950689,
+   "nnz_before": 10002236
   }
  }
 }

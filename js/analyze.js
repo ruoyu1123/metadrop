@@ -210,7 +210,7 @@ function classify(mag, c) {
  *   onProgress: (frac, msg) => void
  *   computeImpact: 是否跑"移除后"预测(默认 true)
  */
-export async function annotateDataset(ds, { onProgress = () => {}, computeImpact = true } = {}) {
+export async function annotateDataset(ds, { onProgress = () => {}, computeImpact = true, deferImpact = false } = {}) {
   const engine = ds.engine;
   const mags = Array.from(ds.mags.values());
 
@@ -232,13 +232,18 @@ export async function annotateDataset(ds, { onProgress = () => {}, computeImpact
   onProgress(0.05, t('status.progress.hicAbund'));
 
   // ---- 2. 逐个 contig 的"移除后"预测 ----
-  if (computeImpact) {
-    const contributions = mags.map((m) => m.contigList.map((c) => c.contribution));
+  // deferImpact=true 时跳过预计算(大基因组要等几十分钟),改为:
+  //   * 悬停/点击时由 app.js 调 computeImpactFor 即时算一次并缓存
+  //   * app.js 再起一个后台分块循环慢慢补全
+  // 注意 contributions / contribIndex 两种模式都要建,按需计算依赖它们。
+  {
     let done = 0;
     const total = mags.reduce((a, m) => a + m.contigList.length, 0);
-    for (let mi = 0; mi < mags.length; mi++) {
-      const mag = mags[mi];
-      const contribs = contributions[mi];
+    for (const mag of mags) {
+      const contribs = mag.contigList.map((c) => c.contribution);
+      mag.contributions = contribs;
+      mag.contribIndex = new Map(mag.contigList.map((c, i) => [c.id, i]));
+      if (deferImpact) continue;
       const useNn = mag.forcedModel !== 'general';
       for (let i = 0; i < contribs.length; i++) {
         const c = mag.contigList[i];
@@ -254,8 +259,6 @@ export async function annotateDataset(ds, { onProgress = () => {}, computeImpact
           await new Promise((r) => setTimeout(r, 0));
         }
       }
-      // 顺便给整个 MAG 存一份 contributions 引用,后面复用
-      mag.contributions = contribs;
     }
   }
 
@@ -331,6 +334,64 @@ export function suggestRemovals(ds, { allowContaminant = true } = {}) {
   }
 
   return suggestion;
+}
+
+// ------------------------------------------------------------------ 按需计算(deferImpact 模式)
+
+/**
+ * 单条 contig 的"移除后"预测:没有就算一次并缓存,同时重算该条的结论。
+ * deferImpact 模式下,悬停/点击卡片走的是 hoverPrediction(基于 liveCounts),
+ * 这里补的是 afterRemoval(相对原始状态的口径),供影响列、结论定级与导出使用。
+ * @returns {object|null} afterRemoval(该 contig 不属于此 MAG 时为 null)
+ */
+export function computeImpactFor(engine, mag, c) {
+  if (c.afterRemoval) return c.afterRemoval;
+  if (!mag.contributions) {
+    mag.contributions = mag.contigList.map((x) => x.contribution);
+    mag.contribIndex = new Map(mag.contigList.map((x, i) => [x.id, i]));
+  }
+  const i = mag.contribIndex.get(c.id);
+  if (i == null) return null;
+  c.afterRemoval = engine.predictWithoutContigs(mag.baseCounts, mag.contributions, [i], {
+    nn: mag.forcedModel !== 'general',
+    forcedModel: mag.forcedModel,
+  });
+  // afterRemoval 就绪后 core/neutral 的定级可能变化,重算一次结论
+  const { verdict, reasons } = classify(mag, c);
+  c.verdict = verdict;
+  c.reasons = reasons;
+  return c.afterRemoval;
+}
+
+/**
+ * 为"有归属证据但还没算影响"的 contig 批量补算 —— 自动建议前的准备。
+ * 只算 evidence ≥ 归属存疑阈值的候选,没有 Hi-C/丰度的数据集候选为 0,瞬时完成。
+ * @returns {number} 本次实际计算的条数
+ */
+export async function ensureImpactsForEvidence(engine, ds, { budgetMs = 30, onProgress = () => {} } = {}) {
+  let todo = [];
+  for (const mag of ds.mags.values()) {
+    for (const c of mag.contigList) {
+      if (c.afterRemoval || !c.metrics) continue;
+      if ((c.duplicateOf || []).length) continue;
+      if (placementEvidence(c.metrics) >= EVIDENCE_MISFIT) todo.push([mag, c]);
+    }
+  }
+  const total = todo.length;
+  let done = 0;
+  let sliceStart = performance.now();
+  for (const [mag, c] of todo) {
+    computeImpactFor(engine, mag, c);
+    done++;
+    if (performance.now() - sliceStart >= budgetMs) {
+      onProgress(done, total);
+      // 让出主线程,别把界面卡住
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 0));
+      sliceStart = performance.now();
+    }
+  }
+  return done;
 }
 
 // ------------------------------------------------------------------ 导出
