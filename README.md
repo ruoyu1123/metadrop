@@ -112,6 +112,12 @@ Metadrop therefore keeps two concerns separate:
 | **Recompute quality** | CheckM2's models (GBDT + CNN) ported to WebAssembly, numerically identical to the official implementation |
 | **Decide what to remove** | Only model-independent evidence: Hi-C linkage consistency, abundance-profile similarity, and objective duplication across bins |
 
+When no Hi-C table is supplied the placement evidence becomes a constant and that
+route yields no suggestion. Metadrop then falls back to a constrained search over
+the models' own outputs: it removes the contigs that buy the largest contamination
+drop per point of completeness lost, rejects any step that would push completeness
+below 90%, and stops once contamination reaches 5%.
+
 ## Performance
 
 Measured locally (demo dataset: 3 MAGs, 68 contigs, 3,770 KO hits):

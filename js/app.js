@@ -14,7 +14,7 @@
 import { CheckM2Engine, mimagClass } from './engine.js';
 import { Dataset } from './dataset.js';
 import {
-  annotateDataset, suggestRemovals, summarizeWork, fmtBytes, reasonText, verdictLabel, VERDICTS,
+  annotateDataset, suggestRemovals, suggestRemovalsConstrained, summarizeWork, fmtBytes, reasonText, verdictLabel, VERDICTS,
   computeImpactFor, ensureImpactsForEvidence,
 } from './analyze.js';
 import { collectFiles, streamLines } from './parsers.js';
@@ -497,14 +497,35 @@ function resetAll() {
   setStatus({ key: 'status.resetAll' });
 }
 
+/** 数据集里是否有 Hi-C 证据(任一 contig 有 outFrac) */
+function hasHicEvidence(ds) {
+  for (const mag of ds.mags.values()) {
+    for (const c of mag.contigList) {
+      if (c.metrics && c.metrics.outFrac != null) return true;
+    }
+  }
+  return false;
+}
+
 async function applySuggestion() {
   if (!state.ds || state.busy) return;
   state.busy = true;
   try {
-    // 污染候选的"移除后污染度是否下降"依赖 afterRemoval:deferImpact 模式下
-    // 只为有归属证据的候选按需补算(没有 Hi-C/丰度时候选为 0,瞬时完成)
-    await ensureImpactsForEvidence(state.engine, state.ds);
-    const suggestion = suggestRemovals(state.ds);
+    const ds = state.ds;
+    let suggestion;
+    if (!hasHicEvidence(ds)) {
+      // 没有 Hi-C 时归属证据恒为 0.26,证据路径给不出建议 ——
+      // 改用"污染 ≤5%、完整度 ≥90%"的约束式筛选(与逐条点击同一口径)。
+      setStatus({ key: 'status.suggest.constrained' });
+      suggestion = await suggestRemovalsConstrained(ds, state.engine, {
+        onProgress: (done, total, mag) =>
+          setStatus({ key: 'status.suggest.progress', vars: { done, total, mag } }),
+      });
+    } else {
+      // 有 Hi-C:沿用证据路径,只为有归属证据的候选补算 afterRemoval
+      await ensureImpactsForEvidence(state.engine, ds);
+      suggestion = suggestRemovals(ds);
+    }
     for (const mag of state.ds.mags.values()) mag.removedIds.clear();
     for (const [magName, ids] of suggestion) {
       const mag = state.ds.mags.get(magName);

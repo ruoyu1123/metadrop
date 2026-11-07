@@ -336,6 +336,96 @@ export function suggestRemovals(ds, { allowContaminant = true } = {}) {
   return suggestion;
 }
 
+// ------------------------------------------------------------------ 约束式推荐(无 Hi-C)
+
+/**
+ * 没有 Hi-C/丰度时,归属证据恒为 0.26(见 placementEvidence),证据路径不会给出
+ * 任何建议。这里退回到模型本身:以"污染降到目标、完整度不低于下限"为约束,
+ * 按性价比逐条移除 —— 与人工在界面上逐条点击的次序一致。
+ *
+ *   1. 逐条算单独移除的 Δ污染度,只保留能让污染下降的;
+ *   2. 按"每损失 1 点完整度换来的污染下降"从大到小排序;
+ *   3. 逐条验证式接纳 —— 完整度会跌破下限就拒收,污染达标就停。
+ *
+ * @returns {Promise<Map<string, Set<string>>>} 与 suggestRemovals 同构
+ */
+export async function suggestRemovalsConstrained(ds, engine, {
+  minCompleteness = 90,
+  targetContamination = 5,
+  onProgress = () => {},
+  yieldEveryMs = 30,
+  signal = null,
+} = {}) {
+  const suggestion = new Map();
+  const mags = [...ds.mags.values()];
+  let total = 0;
+  for (const m of mags) total += m.contigList.length;
+  let done = 0;
+  let lastYield = performance.now();
+
+  const add = (mag, idxs) => {
+    if (!idxs.length) return;
+    let s = suggestion.get(mag.name);
+    if (!s) { s = new Set(); suggestion.set(mag.name, s); }
+    for (const i of idxs) s.add(mag.contigList[i].id);
+  };
+
+  for (const mag of mags) {
+    const base = mag.prediction && mag.prediction.recalc;
+    // 基线已达标就不动
+    if (!base || base.contamination <= targetContamination + 1e-9) {
+      done += mag.contigList.length;
+      onProgress(done, total, mag.name);
+      continue;
+    }
+    if (!mag.contributions) {
+      mag.contributions = mag.contigList.map((x) => x.contribution);
+      mag.contribIndex = new Map(mag.contigList.map((x, i) => [x.id, i]));
+    }
+    const opts = { nn: mag.forcedModel !== 'general', forcedModel: mag.forcedModel };
+    const predict = (idxs) =>
+      engine.predictWithoutContigs(mag.baseCounts, mag.contributions, idxs, opts);
+
+    // 1) 单条扫描:只留"确实降污"的候选
+    const cand = [];
+    for (let i = 0; i < mag.contigList.length; i++) {
+      if (signal && signal.aborted) return suggestion;
+      const contrib = mag.contributions[i];
+      done++;
+      if (!contrib || !contrib.cds) continue;
+      const r = predict([i]);
+      const dX = r.contamination - base.contamination;
+      if (dX < -1e-9) {
+        const dC = r.completeness - base.completeness;
+        cand.push({ i, gain: -dX, cost: Math.max(0, -dC) });
+      }
+      if (performance.now() - lastYield > yieldEveryMs) {
+        onProgress(done, total, mag.name);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        lastYield = performance.now();
+      }
+    }
+
+    // 2) 性价比排序:+0.02 让"几乎不损失完整度"的条目稳居前列,也避开零代价的浮点噪声
+    cand.sort((a, b) => (b.gain / (b.cost + 0.02)) - (a.gain / (a.cost + 0.02)));
+
+    // 3) 验证式移除:跌破完整度下限就撤回,污染达标就收工
+    const removed = [];
+    for (const x of cand) {
+      if (signal && signal.aborted) break;
+      removed.push(x.i);
+      const r = predict(removed);
+      if (r.completeness < minCompleteness - 1e-9) { removed.pop(); continue; }
+      if (r.contamination <= targetContamination + 1e-9) break;
+    }
+    add(mag, removed);
+    onProgress(done, total, mag.name);
+  }
+
+  onProgress(total, total, '');
+  return suggestion;
+}
+
 // ------------------------------------------------------------------ 按需计算(deferImpact 模式)
 
 /**
